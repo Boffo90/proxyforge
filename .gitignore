@@ -24,3 +24,4 @@ _update.bat
 # legacy
 *.bat
 installer/
+tmo_log.txt

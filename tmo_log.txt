@@ -1,3 +1,0 @@
-start 
-timeout_exit_code=125 
-ping_exit_code=0 
