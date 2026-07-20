@@ -220,6 +220,9 @@ class App(_Root):
         elif "gpu_ok" not in load_settings():
             threading.Thread(target=self._probe_gpu_silent, daemon=True).start()
 
+        # a failed update leaves the download behind; don't keep 38 MB around
+        app_update.cleanup_leftovers()
+
         # silent update check
         threading.Thread(target=self._check_update, daemon=True).start()
 
@@ -258,13 +261,25 @@ class App(_Root):
         def run():
             try:
                 app_update.apply_update(info["url"])
-                self._ui(self.destroy)
+                self._ui(self._quit_for_update)
             except Exception as e:
                 self._ui(messagebox.showerror, "Update failed", str(e))
                 self._ui(lambda: self.update_btn.configure(
                     state="normal", text=f"Update {info['version']} ↓"))
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _quit_for_update(self):
+        """
+        Exit immediately so the swap script can replace the exe. We skip the
+        normal teardown on purpose: this process is being replaced, and a
+        slow/erroring shutdown would keep the file locked.
+        """
+        try:
+            self.destroy()
+        except Exception:
+            pass
+        os._exit(0)
 
     # ---------------------------------------------------------------- header
     def _build_header(self):

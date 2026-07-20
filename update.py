@@ -67,6 +67,22 @@ def check_for_update() -> dict | None:
     return None
 
 
+def cleanup_leftovers():
+    """Remove artifacts of an update that did not complete."""
+    try:
+        for name in ("_update.bat",):
+            f = ROOT / name
+            if f.exists():
+                f.unlink()
+        if getattr(sys, "frozen", False):
+            leftover = Path(sys.executable).with_name(
+                Path(sys.executable).stem + "_new.exe")
+            if leftover.exists():
+                leftover.unlink()
+    except OSError:
+        pass
+
+
 def apply_update(url: str, progress_callback=None):
     """
     Download the new exe and restart into it. Only meaningful when frozen;
@@ -89,18 +105,73 @@ def apply_update(url: str, progress_callback=None):
             if progress_callback and total:
                 progress_callback(got / total)
 
+    _write_swap_script(current, new)
+    # caller should now close the app
+
+
+def _write_swap_script(current: Path, new: Path) -> Path:
+    """
+    Write and launch the script that swaps the exe once this app has exited.
+
+    A PyInstaller onefile app is TWO processes (bootloader + child), so we
+    wait on the image name rather than a PID: waiting on os.getpid() only
+    sees the child, and moving the exe while the bootloader still holds it
+    fails silently — which then relaunches the OLD exe alongside the dying
+    one and corrupts its _MEI temp dir.
+    """
+    # Absolute System32 paths + ping-based sleeps: "timeout" needs a console
+    # (we launch without one) and both it and tasklist can be shadowed by
+    # Unix ports on a developer's PATH.
     bat = ROOT / "_update.bat"
     bat.write_text(
         "@echo off\r\n"
+        "setlocal enableextensions\r\n"
+        'set "SYS=%SystemRoot%\\System32"\r\n'
+        'set "SLEEP=%SYS%\\ping.exe -n 2 127.0.0.1"\r\n'
+        f'set "EXE={current.name}"\r\n'
+        f'set "CUR={current}"\r\n'
+        f'set "NEW={new}"\r\n'
+        "\r\n"
+        ":: wait for every instance (bootloader + child) to exit\r\n"
+        "set /a waited=0\r\n"
         ":wait\r\n"
-        "timeout /t 1 /nobreak >nul\r\n"
-        f'tasklist /FI "PID eq {os.getpid()}" 2>nul | find "{os.getpid()}" >nul && goto wait\r\n'
-        f'move /y "{new}" "{current}" >nul\r\n'
-        f'start "" "{current}"\r\n'
+        "%SLEEP% >nul\r\n"
+        '%SYS%\\tasklist.exe /FI "IMAGENAME eq %EXE%" 2>nul | '
+        '%SYS%\\find.exe /I "%EXE%" >nul\r\n'
+        "if errorlevel 1 goto gone\r\n"
+        "set /a waited+=1\r\n"
+        "if %waited% lss 60 goto wait\r\n"
+        ":: still running after ~60s - abort and keep the current exe\r\n"
+        'del /f /q "%NEW%" >nul 2>&1\r\n'
+        "goto end\r\n"
+        "\r\n"
+        ":gone\r\n"
+        ":: let the bootloader release the file and clean its temp dir\r\n"
+        "%SLEEP% >nul\r\n"
+        "%SLEEP% >nul\r\n"
+        "set /a tries=0\r\n"
+        ":trymove\r\n"
+        'move /y "%NEW%" "%CUR%" >nul 2>&1\r\n'
+        "if not errorlevel 1 goto done\r\n"
+        "set /a tries+=1\r\n"
+        "if %tries% geq 15 goto giveup\r\n"
+        "%SLEEP% >nul\r\n"
+        "goto trymove\r\n"
+        "\r\n"
+        ":giveup\r\n"
+        ":: could not replace it - leave the old exe working, drop the download\r\n"
+        'del /f /q "%NEW%" >nul 2>&1\r\n'
+        "goto end\r\n"
+        "\r\n"
+        ":done\r\n"
+        "%SLEEP% >nul\r\n"
+        'start "" "%CUR%"\r\n'
+        "\r\n"
+        ":end\r\n"
         'del "%~f0"\r\n',
         encoding="ascii")
 
     subprocess.Popen(["cmd", "/c", str(bat)],
                      creationflags=subprocess.CREATE_NO_WINDOW,
                      cwd=str(ROOT))
-    # caller should now close the app
+    return bat
