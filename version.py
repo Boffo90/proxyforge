@@ -7,4 +7,4 @@ APP_VERSION = "2.0.0"
 # GitHub repository used for auto-updates ("owner/repo").
 # Point this at the real repo once it exists; update checks fail silently
 # until then.
-GITHUB_REPO = "volcanproxies/proxyforge"
+GITHUB_REPO = "Boffo90/proxyforge"
