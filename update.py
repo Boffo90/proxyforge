@@ -68,12 +68,12 @@ def check_for_update() -> dict | None:
 
 
 def cleanup_leftovers():
-    """Remove artifacts of an update that did not complete."""
+    """
+    Remove the download left behind by an update that did not complete.
+    (_update.bat is not touched: it deletes itself, and after a successful
+    update it is still running as this process's parent.)
+    """
     try:
-        for name in ("_update.bat",):
-            f = ROOT / name
-            if f.exists():
-                f.unlink()
         if getattr(sys, "frozen", False):
             leftover = Path(sys.executable).with_name(
                 Path(sys.executable).stem + "_new.exe")
@@ -164,18 +164,13 @@ def _write_swap_script(current: Path, new: Path) -> Path:
         "goto end\r\n"
         "\r\n"
         ":done\r\n"
-        ":: give Defender time to finish scanning the freshly written 39 MB\r\n"
-        ":: exe - launching too early makes the bootloader fail to extract\r\n"
-        ":: its Python DLL\r\n"
-        "%SYS%\\ping.exe -n 7 127.0.0.1 >nul\r\n"
-        'start "" "%CUR%"\r\n'
-        ":: if it did not come up (scan still holding it), try once more\r\n"
-        "%SYS%\\ping.exe -n 8 127.0.0.1 >nul\r\n"
-        '%SYS%\\tasklist.exe /FI "IMAGENAME eq %EXE%" 2>nul | '
-        '%SYS%\\find.exe /I "%EXE%" >nul\r\n'
-        "if not errorlevel 1 goto end\r\n"
-        "%SYS%\\ping.exe -n 6 127.0.0.1 >nul\r\n"
-        'start "" "%CUR%"\r\n'
+        ":: let the filesystem settle before running the new exe\r\n"
+        "%SYS%\\ping.exe -n 4 127.0.0.1 >nul\r\n"
+        ":: Run it directly instead of via START. A onefile app launched\r\n"
+        ":: detached (start / Start-Process / explorer) fails to unpack its\r\n"
+        ":: Python DLL; run as a child of this script it unpacks fine. This\r\n"
+        ":: cmd then simply waits here for the app's lifetime.\r\n"
+        '"%CUR%"\r\n'
         "\r\n"
         ":end\r\n"
         'del "%~f0"\r\n',
