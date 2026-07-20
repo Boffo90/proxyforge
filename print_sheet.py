@@ -225,7 +225,7 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
         if any(b is None for b in backs) and default_back is None:
             raise ValueError(
                 "back.png not found.\nPut a card-back image named back.png "
-                "(or back.jpg) next to MTGEnhancer.exe — it is used for "
+                "(or back.jpg) next to ProxyForge.exe — it is used for "
                 "every card that has no double-faced back of its own.")
         backs = [Path(b) if b else default_back for b in backs]
 
@@ -276,7 +276,7 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
             target = out_path.with_name(f"{out_path.stem}-{gi + 1:02d}{out_path.suffix}")
 
         c = canvas.Canvas(str(target), pagesize=page)
-        c.setTitle("MTG Enhancer print sheet")
+        c.setTitle("ProxyForge print sheet")
 
         for batch in group:
             # ---- front page
@@ -337,7 +337,7 @@ def build_calibration(image_path, out_path, page_name="A4",
     ox, oy = _block_origin(pw, ph, block_w, block_h, shift_down_mm)
 
     c = canvas.Canvas(str(out_path), pagesize=page)
-    c.setTitle("MTG Enhancer calibration sheet")
+    c.setTitle("ProxyForge calibration sheet")
 
     temp_files = []
     for idx, (pid, profile) in enumerate(sorted(CALIBRATION_PROFILES.items())):
@@ -360,7 +360,7 @@ def build_calibration(image_path, out_path, page_name="A4",
     c.setFillColorRGB(0.3, 0.3, 0.3)
     c.setFont("Helvetica", 8)
     c.drawCentredString(pw / 2, oy - MARK_LEN - 4 * mm,
-                        "MTG Enhancer calibration — print at 100% scale, no printer color correction. "
+                        "ProxyForge calibration — print at 100% scale, no printer color correction. "
                         "Pick the number closest to a real card.")
     c.showPage()
     c.save()
@@ -390,7 +390,7 @@ def build_shadow_test(image_path, out_path, page_name="A4", profile_id=1,
     ox, oy = _block_origin(pw, ph, block_w, block_h, shift_down_mm)
 
     c = canvas.Canvas(str(out_path), pagesize=page)
-    c.setTitle("MTG Enhancer shadow test")
+    c.setTitle("ProxyForge shadow test")
 
     temp_files = []
     for idx, level in enumerate(SHADOW_TEST_LEVELS[:PER_PAGE]):

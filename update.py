@@ -19,7 +19,7 @@ import requests
 from config import ROOT
 from version import APP_VERSION, GITHUB_REPO
 
-_UA = {"User-Agent": f"MTGEnhancer/{APP_VERSION}",
+_UA = {"User-Agent": f"ProxyForge/{APP_VERSION}",
        "Accept": "application/vnd.github+json"}
 
 

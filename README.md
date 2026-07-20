@@ -1,4 +1,4 @@
-# MTG Enhancer <!-- TODO: final name pending -->
+# ProxyForge
 
 Desktop app that turns Magic: The Gathering card images into **true 1200 DPI
 print-ready proxies** using AI upscaling on your own GPU — free, offline

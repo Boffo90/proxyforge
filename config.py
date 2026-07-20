@@ -109,7 +109,7 @@ SCRYFALL_API = "https://api.scryfall.com"
 
 # Scryfall asks for a descriptive User-Agent and a small delay between calls.
 SCRYFALL_HEADERS = {
-    "User-Agent": "MTG-Enhancer/2.0 (personal upscaler)",
+    "User-Agent": "ProxyForge/2.0 (proxy print studio)",
     "Accept": "application/json",
 }
 
@@ -247,7 +247,7 @@ def save_settings(data: dict):
 # WINDOW
 # ==========================================
 
-WINDOW_TITLE = "MTG Enhancer"
+from version import APP_NAME as WINDOW_TITLE  # noqa: E402
 
 WINDOW_WIDTH = 1040
 

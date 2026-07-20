@@ -28,7 +28,7 @@ from config import ROOT, MODELS_FOLDER, REALESRGAN_EXE, TEMP_FOLDER, \
 
 CREATE_NO_WINDOW = 0x08000000
 
-_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MTGEnhancer"}
+_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ProxyForge"}
 
 ENGINE_ZIP_URL = ("https://github.com/xinntao/Real-ESRGAN/releases/download/"
                   "v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip")
