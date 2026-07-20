@@ -164,12 +164,24 @@ def _write_swap_script(current: Path, new: Path) -> Path:
         "goto end\r\n"
         "\r\n"
         ":done\r\n"
-        "%SLEEP% >nul\r\n"
+        ":: give Defender time to finish scanning the freshly written 39 MB\r\n"
+        ":: exe - launching too early makes the bootloader fail to extract\r\n"
+        ":: its Python DLL\r\n"
+        "%SYS%\\ping.exe -n 7 127.0.0.1 >nul\r\n"
+        'start "" "%CUR%"\r\n'
+        ":: if it did not come up (scan still holding it), try once more\r\n"
+        "%SYS%\\ping.exe -n 8 127.0.0.1 >nul\r\n"
+        '%SYS%\\tasklist.exe /FI "IMAGENAME eq %EXE%" 2>nul | '
+        '%SYS%\\find.exe /I "%EXE%" >nul\r\n'
+        "if not errorlevel 1 goto end\r\n"
+        "%SYS%\\ping.exe -n 6 127.0.0.1 >nul\r\n"
         'start "" "%CUR%"\r\n'
         "\r\n"
         ":end\r\n"
         'del "%~f0"\r\n',
-        encoding="ascii")
+        # newline="" or Python turns every \r\n into \r\r\n, which cmd
+        # mis-parses
+        encoding="ascii", newline="")
 
     subprocess.Popen(["cmd", "/c", str(bat)],
                      creationflags=subprocess.CREATE_NO_WINDOW,
