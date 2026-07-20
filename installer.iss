@@ -18,7 +18,10 @@ DefaultDirName={localappdata}\{#AppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=installer
-OutputBaseFilename=ProxyForge-Setup-{#AppVersion}
+; underscore matters: release assets are listed alphabetically by the GitHub
+; API, and older clients pick the FIRST .exe — "_" sorts after ".exe" so the
+; bare app exe always comes first
+OutputBaseFilename=ProxyForge_Setup-{#AppVersion}
 SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 Compression=lzma2
