@@ -1,0 +1,25 @@
+# build & runtime artifacts
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+
+# downloaded on first run (never committed: licensing + size)
+realesrgan-ncnn-vulkan.exe
+vcomp140.dll
+vcomp140d.dll
+models/
+
+# user data
+output/
+_temp/
+settings.json
+back.png
+back.jpg
+MTGEnhancer.exe
+*.exe
+_update.bat
+
+# legacy
+*.bat
