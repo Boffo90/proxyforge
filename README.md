@@ -63,5 +63,7 @@ python main.py
 
 ## Support
 
-Free for the community. If it saves you time, donations are welcome:
-<!-- TODO: donation link -->
+Free for the community. If ProxyForge saves you time, donations help keep
+it maintained:
+
+[![Donate](https://img.shields.io/badge/PayPal-Donate-gold?logo=paypal)](https://www.paypal.com/paypalme/warchazzz)

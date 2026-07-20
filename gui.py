@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import threading
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -47,7 +48,7 @@ import scryfall
 import print_sheet
 import bootstrap
 import update as app_update
-from version import APP_NAME, APP_VERSION
+from version import APP_NAME, APP_VERSION, DONATE_URL
 
 
 ctk.set_appearance_mode("Dark")
@@ -280,6 +281,12 @@ class App(_Root):
                      text_color=MUTED).pack(side="left", pady=(14, 0))
         ctk.CTkLabel(header, text=f"v{APP_VERSION}", font=("Segoe UI", 11),
                      text_color=MUTED).pack(side="right", pady=(14, 0))
+        ctk.CTkButton(header, text="♥ Donate", width=84, height=28,
+                      fg_color="transparent", hover_color=GRAY_HOVER,
+                      border_width=1, border_color=GOLD, text_color=GOLD,
+                      font=("Segoe UI", 12),
+                      command=lambda: webbrowser.open(DONATE_URL)).pack(
+            side="right", padx=(4, 10), pady=(10, 0))
 
     # ---------------------------------------------------------------- inputs
     def _build_inputs(self):
