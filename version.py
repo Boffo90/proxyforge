@@ -2,7 +2,7 @@
 
 APP_NAME = "ProxyForge"
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 
 # GitHub repository used for auto-updates ("owner/repo").
 # Point this at the real repo once it exists; update checks fail silently

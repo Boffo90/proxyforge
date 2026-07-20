@@ -41,6 +41,15 @@ from config import (
 
 CARD_W = 63 * mm
 CARD_H = 88 * mm
+
+# name -> (cols, rows, landscape)
+LAYOUTS = {
+    "3×3 portrait": (3, 3, False),
+    "4×2 landscape": (4, 2, True),
+}
+DEFAULT_LAYOUT = "3×3 portrait"
+
+# calibration / shadow test sheets always use the classic grid
 COLS = 3
 ROWS = 3
 PER_PAGE = COLS * ROWS
@@ -140,19 +149,20 @@ BLEED_COLORS = {
 }
 
 
-def _boundaries(origin, size, gutter):
+def _boundaries(origin, size, gutter, count=3):
     """Card-edge coordinates along one axis (duplicates removed at gutter 0)."""
     edges = []
-    for i in range(3):
+    for i in range(count):
         a = origin + i * (size + gutter)
         edges.append(a)
         edges.append(a + size)
     return sorted(set(edges))
 
 
-def _draw_marks(c, ox, oy, block_w, block_h, gutter=0.0, guide_rgb=(1, 1, 1)):
-    xs = _boundaries(ox, CARD_W, gutter)
-    ys = _boundaries(oy, CARD_H, gutter)
+def _draw_marks(c, ox, oy, block_w, block_h, gutter=0.0, guide_rgb=(1, 1, 1),
+                cols=COLS, rows=ROWS):
+    xs = _boundaries(ox, CARD_W, gutter, cols)
+    ys = _boundaries(oy, CARD_H, gutter, rows)
     tick = 4 * mm
 
     # short cross ticks at every card corner (over borders / bleed frames)
@@ -175,9 +185,9 @@ def _draw_marks(c, ox, oy, block_w, block_h, gutter=0.0, guide_rgb=(1, 1, 1)):
         c.line(ox + block_w + MARK_GAP, y, ox + block_w + MARK_GAP + MARK_LEN, y)
 
 
-def _card_pos(idx, ox, oy, block_h, gutter=0.0):
-    col = idx % COLS
-    row = idx // COLS
+def _card_pos(idx, ox, oy, block_h, gutter=0.0, cols=COLS):
+    col = idx % cols
+    row = idx // cols
     x = ox + col * (CARD_W + gutter)
     y = oy + block_h - (row + 1) * CARD_H - row * gutter
     return x, y
@@ -192,7 +202,7 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
               pages_per_file=0, backs=None, back_offset=(0.0, 0.0),
               back_bleed_mm=1.5, shift_down_mm=0.0,
               edge_bleed_mm=0.0, bleed_color="Black", guide_color="White",
-              status_callback=None) -> list[Path]:
+              layout=DEFAULT_LAYOUT, status_callback=None) -> list[Path]:
     """
     Compose `images` (paths, in order) into one or more print-sheet PDFs.
 
@@ -235,11 +245,15 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
     profile = CALIBRATION_PROFILES.get(profile_id)
     shadow = SHADOW_LIFTS.get(shadow_name, 0)
 
+    cols, rows, landscape = LAYOUTS.get(layout, LAYOUTS[DEFAULT_LAYOUT])
+    per_page = cols * rows
     page = PAGES.get(page_name, A4)
+    if landscape:
+        page = (page[1], page[0])
     pw, ph = page
     gutter = 2 * edge_bleed_mm * mm
-    block_w = COLS * CARD_W + (COLS - 1) * gutter
-    block_h = ROWS * CARD_H + (ROWS - 1) * gutter
+    block_w = cols * CARD_W + (cols - 1) * gutter
+    block_h = rows * CARD_H + (rows - 1) * gutter
     if block_w > pw - 2 * MIN_BOTTOM or block_h > ph - 2 * MIN_BOTTOM:
         raise ValueError("Edge bleed too large for this page size")
     ox, oy = _block_origin(pw, ph, block_w, block_h, shift_down_mm)
@@ -251,7 +265,7 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
 
     # split the card list into sheets, then sheets into files
     idxs = list(range(len(images)))
-    batches = [idxs[i:i + PER_PAGE] for i in range(0, len(idxs), PER_PAGE)]
+    batches = [idxs[i:i + per_page] for i in range(0, len(idxs), per_page)]
     if pages_per_file and pages_per_file > 0:
         groups = [batches[i:i + pages_per_file]
                   for i in range(0, len(batches), pages_per_file)]
@@ -283,7 +297,7 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
             if ebleed > 0:
                 c.setFillColorRGB(*bleed_rgb)
                 for slot in range(len(batch)):
-                    x, y = _card_pos(slot, ox, oy, block_h, gutter)
+                    x, y = _card_pos(slot, ox, oy, block_h, gutter, cols)
                     c.rect(x - ebleed, y - ebleed,
                            CARD_W + 2 * ebleed, CARD_H + 2 * ebleed,
                            stroke=0, fill=1)
@@ -291,25 +305,25 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
                 placed += 1
                 if status_callback:
                     status_callback(f"Placing card {placed}/{len(images)}…")
-                x, y = _card_pos(slot, ox, oy, block_h, gutter)
+                x, y = _card_pos(slot, ox, oy, block_h, gutter, cols)
                 c.drawImage(ImageReader(str(flat(images[i]))), x, y, CARD_W, CARD_H)
-            _draw_marks(c, ox, oy, block_w, block_h, gutter, guide_rgb)
+            _draw_marks(c, ox, oy, block_w, block_h, gutter, guide_rgb, cols, rows)
             c.showPage()
 
             # ---- mirrored back page (duplex, flip on long edge)
             if backs is not None:
                 bleed = back_bleed_mm * mm
                 for slot, i in enumerate(batch):
-                    col = slot % COLS
-                    row = slot // COLS
-                    mirrored = row * COLS + (COLS - 1 - col)
-                    x, y = _card_pos(mirrored, ox, oy, block_h, gutter)
+                    col = slot % cols
+                    row = slot // cols
+                    mirrored = row * cols + (cols - 1 - col)
+                    x, y = _card_pos(mirrored, ox, oy, block_h, gutter, cols)
                     # oversized by the bleed on every edge: small duplex
                     # drift stays covered when cutting along the front
                     c.drawImage(ImageReader(str(flat(backs[i]))),
                                 x + dx - bleed, y + dy - bleed,
                                 CARD_W + 2 * bleed, CARD_H + 2 * bleed)
-                _draw_marks(c, ox, oy, block_w, block_h, gutter, guide_rgb)
+                _draw_marks(c, ox, oy, block_w, block_h, gutter, guide_rgb, cols, rows)
                 c.showPage()
 
         c.save()

@@ -810,6 +810,8 @@ class ExportDialog(ctk.CTkToplevel):
                                                  CALIBRATION_PROFILES[1])[0]
 
         section("Layout")
+        self.layout = row("Card grid", list(print_sheet.LAYOUTS.keys()),
+                          s.get("layout", print_sheet.DEFAULT_LAYOUT))
         self.page = row("Page size", PDF_PAGE_SIZES,
                         s.get("page", PDF_DEFAULT_PAGE))
         self.split = row("File split", list(PAGES_PER_FILE.keys()),
@@ -867,9 +869,9 @@ class ExportDialog(ctk.CTkToplevel):
         right.grid(row=1, column=1, sticky="nsew", padx=(8, 16), pady=8)
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(1, weight=1)
-        ctk.CTkLabel(right, text="Preview - page 1 (fronts)",
-                     text_color=MUTED, font=("Segoe UI", 12)).grid(
-            row=0, column=0, pady=(10, 2))
+        self.preview_title = ctk.CTkLabel(right, text="Preview - page 1 (fronts)",
+                                          text_color=MUTED, font=("Segoe UI", 12))
+        self.preview_title.grid(row=0, column=0, pady=(10, 2))
         self.preview_label = ctk.CTkLabel(right, text="Loading preview...",
                                           text_color=MUTED)
         self.preview_label.grid(row=1, column=0, pady=(0, 10))
@@ -926,6 +928,7 @@ class ExportDialog(ctk.CTkToplevel):
         dx, dy = self._offsets()
         s = load_settings()
         s.update({
+            "layout": self.layout.get(),
             "page": self.page.get(),
             "quality": self.quality.get(),
             "split": self.split.get(),
@@ -947,14 +950,12 @@ class ExportDialog(ctk.CTkToplevel):
         self.after(0, lambda: self.status.configure(text=text))
 
     # ------------------------------------------------------------- preview
-    _SCALE = 1.85  # px per mm
+    _PREVIEW_BOX = (470, 560)   # max preview pixels (w, h)
 
     def _load_thumbs(self):
-        s = self._SCALE
-        tw, th = int(63 * s), int(88 * s)
-        for p in self.images[:9]:
+        for p in self.images[:12]:
             try:
-                t = PILImage.open(p).convert("RGB").resize((tw, th))
+                t = PILImage.open(p).convert("RGB").resize((200, 279))
                 self._thumbs[str(p)] = t
             except OSError:
                 continue
@@ -972,16 +973,21 @@ class ExportDialog(ctk.CTkToplevel):
         self._prev_job = self.after(200, self._draw_preview)
 
     def _draw_preview(self):
-        s = self._SCALE
+        cols, rows, landscape = print_sheet.LAYOUTS.get(
+            self.layout.get(), print_sheet.LAYOUTS[print_sheet.DEFAULT_LAYOUT])
         pw, ph = _PAGE_MM.get(self.page.get(), _PAGE_MM["A4"])
+        if landscape:
+            pw, ph = ph, pw
+        s = min(self._PREVIEW_BOX[0] / pw, self._PREVIEW_BOX[1] / ph)
         W, H = int(pw * s), int(ph * s)
         img = PILImage.new("RGB", (W, H), (255, 255, 255))
         d = PILDraw.Draw(img)
 
+        per_page = cols * rows
         eb = self._edge_bleed()
         g = 2 * eb
-        bw = 3 * 63 + 2 * g
-        bh = 3 * 88 + 2 * g
+        bw = cols * 63 + (cols - 1) * g
+        bh = rows * 88 + (rows - 1) * g
         left = (pw - bw) / 2
         top = (ph - bh) / 2 + self._shift()
         if ph - top - bh < 3:
@@ -993,9 +999,11 @@ class ExportDialog(ctk.CTkToplevel):
         bleed_fill = {"Black": (10, 10, 10), "White": (250, 250, 250)}.get(
             self.bleed_color.get(), (10, 10, 10))
 
+        cw, ch = X(left + 63) - X(left), X(top + 88) - X(top)
+
         # bleed frames + cards
-        for idx in range(9):
-            col, rw = idx % 3, idx // 3
+        for idx in range(per_page):
+            col, rw = idx % cols, idx // cols
             x = left + col * (63 + g)
             y = top + rw * (88 + g)
             if idx < len(self.images):
@@ -1005,7 +1013,7 @@ class ExportDialog(ctk.CTkToplevel):
                                 fill=bleed_fill, outline=(210, 210, 215))
                 t = self._thumbs.get(str(self.images[idx]))
                 if t:
-                    img.paste(t, (X(x), X(y)))
+                    img.paste(t.resize((cw, ch)), (X(x), X(y)))
                 else:
                     d.rectangle([X(x), X(y), X(x + 63), X(y + 88)],
                                 fill=(55, 60, 76))
@@ -1014,8 +1022,9 @@ class ExportDialog(ctk.CTkToplevel):
         gc = {"White": (255, 255, 255), "Black": (0, 0, 0),
               "Gray": (120, 120, 120), "None": None}.get(self.guides.get())
         xs, ys = set(), set()
-        for c_ in range(3):
+        for c_ in range(cols):
             xs.add(left + c_ * (63 + g)); xs.add(left + c_ * (63 + g) + 63)
+        for c_ in range(rows):
             ys.add(top + c_ * (88 + g)); ys.add(top + c_ * (88 + g) + 88)
         if gc:
             for x in xs:
@@ -1038,6 +1047,9 @@ class ExportDialog(ctk.CTkToplevel):
         self._preview_img = ctk.CTkImage(light_image=img, dark_image=img,
                                          size=(W, H))
         self.preview_label.configure(image=self._preview_img, text="")
+        pages = -(-len(self.images) // per_page)
+        self.preview_title.configure(
+            text=f"Preview - page 1 of {pages} (fronts)")
 
     # ------------------------------------------------------------- actions
     def _export(self):
@@ -1060,6 +1072,7 @@ class ExportDialog(ctk.CTkToplevel):
             images, backs = self.images, None
 
         args = dict(
+            layout=self.layout.get(),
             page_name=self.page.get(),
             quality=self.quality.get(),
             sharpen_name=self.sharpen.get(),
