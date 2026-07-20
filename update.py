@@ -44,13 +44,24 @@ def check_for_update() -> dict | None:
         tag = rel.get("tag_name", "")
         if _parse(tag) <= _parse(APP_VERSION):
             return None
-        for asset in rel.get("assets", []):
-            if asset.get("name", "").lower().endswith(".exe"):
-                return {
-                    "version": tag,
-                    "url": asset["browser_download_url"],
-                    "notes": (rel.get("body") or "")[:2000],
-                }
+        # prefer the bare app exe; never grab the installer by mistake
+        assets = rel.get("assets", [])
+        best = None
+        for asset in assets:
+            name = asset.get("name", "").lower()
+            if not name.endswith(".exe"):
+                continue
+            if name == "proxyforge.exe":
+                best = asset
+                break
+            if "setup" not in name and "install" not in name and best is None:
+                best = asset
+        if best:
+            return {
+                "version": tag,
+                "url": best["browser_download_url"],
+                "notes": (rel.get("body") or "")[:2000],
+            }
     except requests.RequestException:
         pass
     return None
