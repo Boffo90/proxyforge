@@ -16,6 +16,7 @@ Print-time adjustments (masters on disk stay untouched):
 
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
 from reportlab import rl_config
 
@@ -80,6 +81,30 @@ def _block_origin(pw, ph, block_w, block_h, shift_down_mm=0.0):
 # Midtones and highlights are untouched, so the card keeps its overall look.
 SHADOW_KNEE = 75
 
+# --- black-border deepening -----------------------------------------------
+# Scans carry their black border at ~20/255 instead of true black, and the
+# shadow lift pushes it further up (~37 with profile 9 + Medium), so it
+# prints as dark grey. This snaps that border to real black.
+#
+# Three independent guards keep it artifact-free:
+#   1. per card: only run when the perimeter is UNIFORMLY dark. Borderless,
+#      full-art and white-bordered cards have art (high variance) or light
+#      pixels there, so they are skipped entirely — no vignette effect.
+#   2. per pixel, spatially: the treated band is measured from the image
+#      (how deep the uniform dark border actually goes), then faded out, so
+#      the border is covered edge to edge with no gradient inside it.
+#   3. per pixel, tonally: only pixels that are already dark are pushed, so
+#      anything bright that reaches into the band is left alone.
+# Detection uses percentiles, not mean/std: scans carry stray bright specks
+# that wreck a standard deviation (one card measured std 22 off four white
+# pixels) while the median and p90 stay rock steady.
+BORDER_RING_FRAC = 0.03      # perimeter depth sampled for detection
+BORDER_MAX_LEVEL = 70        # median brighter than this -> not a black border
+BORDER_MAX_SPREAD = 12       # p90-p50 above this -> art in the ring, skip card
+BORDER_MAX_WIDTH = 0.09      # never treat deeper than this (card width frac)
+BORDER_FADE_FRAC = 0.012     # fade-out distance past the detected border
+BORDER_TONE_MAX = 90         # pixels brighter than this are never touched
+
 
 def _apply_profile(im: Image.Image, profile, shadow=0) -> Image.Image:
     """
@@ -102,8 +127,69 @@ def _apply_profile(im: Image.Image, profile, shadow=0) -> Image.Image:
     return im
 
 
+def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
+    """
+    Snap a washed-out black border to true black. Returns the image
+    unchanged unless the card's perimeter is uniformly dark.
+
+    `opaque` is a bool mask of non-transparent pixels (the PNG's rounded
+    corners must be excluded or every card would look black-bordered).
+    """
+    a = np.asarray(im, dtype=np.float32)
+    h, w = a.shape[:2]
+    gray = a @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+
+    # ---- guard 1: is this actually a uniform black border?
+    t = max(2, int(w * BORDER_RING_FRAC))
+    ring = np.zeros((h, w), dtype=bool)
+    ring[:t, :] = ring[-t:, :] = True
+    ring[:, :t] = ring[:, -t:] = True
+    if opaque is not None:
+        ring &= opaque
+    vals = gray[ring]
+    if vals.size == 0:
+        return im
+    p50, p90 = (float(x) for x in np.percentile(vals, (50, 90)))
+    if p50 > BORDER_MAX_LEVEL or (p90 - p50) > BORDER_MAX_SPREAD:
+        return im
+
+    # ---- distance from the nearest edge, in pixels
+    yy = np.arange(h, dtype=np.float32)[:, None]
+    xx = np.arange(w, dtype=np.float32)[None, :]
+    dist = np.minimum(np.minimum(xx, w - 1 - xx), np.minimum(yy, h - 1 - yy))
+
+    # ---- how deep does the uniform dark border really go?
+    # walk outwards-in and stop where the ring stops being border-dark
+    limit = int(w * BORDER_MAX_WIDTH)
+    cutoff = p90 + 22
+    border_px = limit
+    step = max(1, limit // 30)
+    for d in range(t, limit, step):
+        shell = (dist >= d) & (dist < d + 2)
+        if opaque is not None:
+            shell &= opaque
+        v = gray[shell]
+        if v.size and float(np.percentile(v, 60)) > cutoff:
+            border_px = d
+            break
+
+    # ---- guard 2: spatial weight (full inside the border, then fades)
+    fade = max(2.0, w * BORDER_FADE_FRAC)
+    spatial = np.clip((border_px + fade - dist) / fade, 0.0, 1.0)
+
+    # ---- guard 3: tonal weight (only already-dark pixels)
+    black_point = min(p90 + 6, BORDER_TONE_MAX - 5)
+    tonal = np.clip((BORDER_TONE_MAX - gray) / (BORDER_TONE_MAX - black_point),
+                    0.0, 1.0)
+
+    weight = (spatial * tonal)[..., None]
+    scaled = np.clip((a - black_point) * (255.0 / (255.0 - black_point)), 0, 255)
+    out = a * (1.0 - weight) + scaled * weight
+    return Image.fromarray(out.astype(np.uint8), "RGB")
+
+
 def _flatten(png_path: Path, jpeg_quality, profile=None, sharpen=None,
-             shadow=0, suffix="_sheet") -> Path:
+             shadow=0, deepen_border=False, suffix="_sheet") -> Path:
     """
     Flatten transparent rounded corners onto black, apply the print-time
     adjustments, and write the temp file the PDF will embed.
@@ -111,8 +197,9 @@ def _flatten(png_path: Path, jpeg_quality, profile=None, sharpen=None,
     jpeg_quality None -> PNG (Flate, pixel-identical apart from adjustments)
     """
     im = Image.open(png_path).convert("RGBA")
+    alpha = im.split()[3]
     bg = Image.new("RGB", im.size, (0, 0, 0))
-    bg.paste(im, mask=im.split()[3])
+    bg.paste(im, mask=alpha)
 
     if (profile and profile[1:] != (1.0, 1.0, 1.0)) or shadow > 0:
         bg = _apply_profile(bg, profile, shadow)
@@ -120,6 +207,10 @@ def _flatten(png_path: Path, jpeg_quality, profile=None, sharpen=None,
         radius, percent, threshold = sharpen
         bg = bg.filter(ImageFilter.UnsharpMask(
             radius=radius, percent=percent, threshold=threshold))
+    if deepen_border:
+        # last, so it also undoes the shadow lift inside the border
+        opaque = np.asarray(alpha) > 250
+        bg = _deepen_black_border(bg, opaque)
 
     if jpeg_quality is None:
         out = TEMP_FOLDER / (png_path.stem + suffix + ".png")
@@ -202,7 +293,8 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
               pages_per_file=0, backs=None, back_offset=(0.0, 0.0),
               back_bleed_mm=1.5, shift_down_mm=0.0,
               edge_bleed_mm=0.0, bleed_color="Black", guide_color="White",
-              layout=DEFAULT_LAYOUT, status_callback=None) -> list[Path]:
+              layout=DEFAULT_LAYOUT, deepen_border=False,
+              status_callback=None) -> list[Path]:
     """
     Compose `images` (paths, in order) into one or more print-sheet PDFs.
 
@@ -279,7 +371,8 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
     def flat(img):
         key = str(img)
         if key not in flat_cache:
-            flat_cache[key] = _flatten(img, jpeg_quality, profile, sharpen, shadow)
+            flat_cache[key] = _flatten(img, jpeg_quality, profile, sharpen,
+                                       shadow, deepen_border)
         return flat_cache[key]
 
     placed = 0

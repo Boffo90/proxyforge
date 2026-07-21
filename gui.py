@@ -37,6 +37,8 @@ from config import (
     SHARPEN_DEFAULT,
     SHADOW_LIFTS,
     SHADOW_DEFAULT,
+    BORDER_MODES,
+    BORDER_DEFAULT,
     CALIBRATION_PROFILES,
     BACKS_MODES,
     find_back_image,
@@ -854,6 +856,8 @@ class ExportDialog(ctk.CTkToplevel):
                            s.get("sharpen", SHARPEN_DEFAULT))
         self.shadow = row("Shadow lift", list(SHADOW_LIFTS.keys()),
                           s.get("shadow", SHADOW_DEFAULT))
+        self.border = row("Deepen black border", BORDER_MODES,
+                          s.get("border", BORDER_DEFAULT))
 
         section("Duplex backs")
         self.backs = row("Card backs", BACKS_MODES,
@@ -967,6 +971,7 @@ class ExportDialog(ctk.CTkToplevel):
             "profile": self._profile_id(),
             "sharpen": self.sharpen.get(),
             "shadow": self.shadow.get(),
+            "border": self.border.get(),
             "backs": self.backs.get(),
             "back_dx": dx,
             "back_dy": dy,
@@ -1150,6 +1155,7 @@ class ExportDialog(ctk.CTkToplevel):
             sharpen_name=self.sharpen.get(),
             profile_id=self._profile_id(),
             shadow_name=self.shadow.get(),
+            deepen_border=self.border.get() != BORDER_MODES[0],
             pages_per_file=PAGES_PER_FILE.get(self.split.get(), 0),
             backs=backs,
             back_offset=self._offsets(),

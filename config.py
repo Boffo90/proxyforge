@@ -205,6 +205,18 @@ SHADOW_DEFAULT = "Off"
 SHADOW_TEST_LEVELS = [0, 4, 8, 12, 16, 20, 24, 28, 32]
 
 # ==========================================
+# BLACK BORDER
+# ==========================================
+# Scans store their black border around 20/255, and the shadow lift pushes
+# it higher still, so it prints as dark grey. This snaps it to true black.
+# It auto-detects a genuine black border and leaves borderless, full-art and
+# white-bordered cards completely untouched (no vignette).
+
+BORDER_MODES = ["Off", "On (auto-detect)"]
+
+BORDER_DEFAULT = "On (auto-detect)"
+
+# ==========================================
 # DUPLEX BACKS
 # ==========================================
 # Card back used for non-DFC cards on the duplex backs page. User-supplied
