@@ -175,31 +175,40 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
         (g_right.T[::-1], None if m_right is None else m_right.T[::-1]),
     ]
 
-    # ---- guard 1: is this actually a uniform black border?
+    # ---- guard 1, per edge: each side decides on its own whether it is a
+    # uniform black border, and how deep it goes. Judging the card as a whole
+    # would discard styles that are art on three sides with a black band at
+    # the bottom (Special Guest printings), leaving that band grey.
     t = max(2, int(min(w, h) * BORDER_RING_FRAC))
-    ring = []
-    for lines, masks in edges:
-        band = lines[:t]
-        ring.append(band[masks[:t]] if masks is not None else band.ravel())
-    vals = np.concatenate(ring)
-    if vals.size == 0:
-        return im
-    p50, p90 = (float(x) for x in np.percentile(vals, (50, 90)))
-    if p50 > BORDER_MAX_LEVEL or (p90 - p50) > BORDER_MAX_SPREAD:
-        return im
 
-    # ---- how deep does the border go on EACH edge?
-    def edge_depth(lines, masks) -> int:
+    def edge_depth(lines, masks, level) -> int:
         limit = lines.shape[0]
         for d in range(t, limit):
             v = lines[d][masks[d]] if masks is not None else lines[d]
             if v.size < 8:
                 continue
-            if abs(float(np.percentile(v, BORDER_BG_PCT)) - p50) > BORDER_LEVEL_TOL:
+            if abs(float(np.percentile(v, BORDER_BG_PCT)) - level) > BORDER_LEVEL_TOL:
                 return d
         return limit
 
-    top_px, bot_px, left_px, right_px = (edge_depth(l, m) for l, m in edges)
+    depths, levels = [], []
+    for lines, masks in edges:
+        band = lines[:t]
+        v = band[masks[:t]] if masks is not None else band.ravel()
+        if v.size == 0:
+            depths.append(None)
+            continue
+        e50, e90 = (float(x) for x in np.percentile(v, (50, 90)))
+        if e50 > BORDER_MAX_LEVEL or (e90 - e50) > BORDER_MAX_SPREAD:
+            depths.append(None)          # art reaches this edge: hands off
+            continue
+        depths.append(edge_depth(lines, masks, e50))
+        levels.append(e90)
+
+    if not levels:                       # no black-bordered edge at all
+        return im
+    top_px, bot_px, left_px, right_px = depths
+    p90 = max(levels)
 
     fade = max(2.0, w * BORDER_FADE_FRAC)
     black_point = min(p90 + 6, BORDER_TONE_MAX - 5)
@@ -208,27 +217,30 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
 
     # Only the frame band can change (spatial weight is 0 further in), so we
     # touch ~3M pixels instead of 12M. Each side gets its own band.
-    tb = min(int(top_px + fade) + 2, h // 2)
-    bb = min(int(bot_px + fade) + 2, h // 2)
-    lb = min(int(left_px + fade) + 2, w // 2)
-    rb = min(int(right_px + fade) + 2, w // 2)
+    def band_of(depth, size):
+        return 0 if depth is None else min(int(depth + fade) + 2, size // 2)
+
+    tb = band_of(top_px, h)
+    bb = band_of(bot_px, h)
+    lb = band_of(left_px, w)
+    rb = band_of(right_px, w)
 
     def treat(y0, y1, x0, x1):
         sub = arr[y0:y1, x0:x1].astype(np.float32)
         yy = np.arange(y0, y1, dtype=np.float32)[:, None]
         xx = np.arange(x0, x1, dtype=np.float32)[None, :]
-        # ---- guard 2: spatial weight, per edge so an asymmetric border
-        # (taller bottom on MDFCs) is covered end to end with no step
-        spatial = np.maximum.reduce([
-            np.broadcast_to(np.clip((top_px + fade - yy) / fade, 0.0, 1.0),
-                            (y1 - y0, x1 - x0)),
-            np.broadcast_to(np.clip((bot_px + fade - (h - 1 - yy)) / fade, 0.0, 1.0),
-                            (y1 - y0, x1 - x0)),
-            np.broadcast_to(np.clip((left_px + fade - xx) / fade, 0.0, 1.0),
-                            (y1 - y0, x1 - x0)),
-            np.broadcast_to(np.clip((right_px + fade - (w - 1 - xx)) / fade, 0.0, 1.0),
-                            (y1 - y0, x1 - x0)),
-        ])
+        # ---- guard 2: spatial weight, only from the edges that qualified,
+        # each with its own depth (an MDFC's bottom band runs far deeper
+        # than its sides)
+        shape = (y1 - y0, x1 - x0)
+        terms = []
+        for depth, d_from_edge in ((top_px, yy), (bot_px, h - 1 - yy),
+                                   (left_px, xx), (right_px, w - 1 - xx)):
+            if depth is None:
+                continue
+            terms.append(np.broadcast_to(
+                np.clip((depth + fade - d_from_edge) / fade, 0.0, 1.0), shape))
+        spatial = np.maximum.reduce(terms)
         # ---- guard 3: tonal weight (only already-dark pixels)
         tonal = np.clip((BORDER_TONE_MAX - sub @ lum) /
                         (BORDER_TONE_MAX - black_point), 0.0, 1.0)
@@ -237,10 +249,15 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
         arr[y0:y1, x0:x1] = (sub * (1.0 - weight) + scaled * weight).astype(
             np.uint8)
 
-    treat(0, tb, 0, w)
-    treat(h - bb, h, 0, w)
-    treat(tb, h - bb, 0, lb)
-    treat(tb, h - bb, w - rb, w)
+    if tb:
+        treat(0, tb, 0, w)
+    if bb:
+        treat(h - bb, h, 0, w)
+    if (lb or rb) and h - bb > tb:
+        if lb:
+            treat(tb, h - bb, 0, lb)
+        if rb:
+            treat(tb, h - bb, w - rb, w)
     return Image.fromarray(arr, "RGB")
 
 
