@@ -39,6 +39,7 @@ from config import (
     SHADOW_DEFAULT,
     CALIBRATION_PROFILES,
     BACKS_MODES,
+    find_back_image,
     ICON_FILE,
     load_settings,
     save_settings,
@@ -773,7 +774,6 @@ class ExportDialog(ctk.CTkToplevel):
         self._preview_img = None
 
         s = load_settings()
-        pages_needed = -(-len(images) // 9)
 
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
@@ -782,10 +782,9 @@ class ExportDialog(ctk.CTkToplevel):
         ctk.CTkLabel(self, text="Export print sheet",
                      font=("Georgia", 18, "bold"), text_color=GOLD).grid(
             row=0, column=0, sticky="w", padx=20, pady=(16, 2))
-        ctk.CTkLabel(self, text=f"{len(images)} card(s) from the {source} -> "
-                     f"{pages_needed} page(s)",
-                     text_color=MUTED, font=("Segoe UI", 12)).grid(
-            row=0, column=1, sticky="w", padx=8, pady=(20, 2))
+        self.summary = ctk.CTkLabel(self, text="", text_color=MUTED,
+                                    font=("Segoe UI", 12))
+        self.summary.grid(row=0, column=1, sticky="w", padx=8, pady=(20, 2))
 
         # ------------------------------------------------ left: controls
         left = ctk.CTkScrollableFrame(self, width=430, fg_color=PANEL,
@@ -891,9 +890,20 @@ class ExportDialog(ctk.CTkToplevel):
         right.grid(row=1, column=1, sticky="nsew", padx=(8, 16), pady=8)
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(1, weight=1)
-        self.preview_title = ctk.CTkLabel(right, text="Preview - page 1 (fronts)",
+        head = ctk.CTkFrame(right, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 2))
+        head.grid_columnconfigure(0, weight=1)
+        self.preview_title = ctk.CTkLabel(head, text="Preview",
                                           text_color=MUTED, font=("Segoe UI", 12))
-        self.preview_title.grid(row=0, column=0, pady=(10, 2))
+        self.preview_title.grid(row=0, column=0)
+        self.side_btn = ctk.CTkSegmentedButton(
+            head, values=["Fronts", "Backs"], height=24,
+            font=("Segoe UI", 11), command=lambda _v: self._draw_preview(),
+            fg_color=BG, unselected_color=BG, unselected_hover_color=GRAY_HOVER,
+            selected_color=GOLD, selected_hover_color=GOLD_HOVER,
+            text_color="#d7dbe4")
+        self.side_btn.set("Fronts")
+        self.side_btn.grid(row=0, column=1, sticky="e")
         self.preview_label = ctk.CTkLabel(right, text="Loading preview...",
                                           text_color=MUTED)
         self.preview_label.grid(row=1, column=0, pady=(0, 10))
@@ -974,12 +984,30 @@ class ExportDialog(ctk.CTkToplevel):
     # ------------------------------------------------------------- preview
     _PREVIEW_BOX = (470, 560)   # max preview pixels (w, h)
 
+    def _sheet_images(self):
+        """
+        What actually goes on the sheets, matching the export exactly:
+        (fronts, backs) with backs=None when duplex is off. In duplex mode a
+        card's own back face stops being a front of its own.
+        """
+        if self.backs.get() != BACKS_MODES[0]:
+            fronts, backs = self._pairs()
+            default = find_back_image()
+            backs = [b or default for b in backs]
+            return fronts, backs
+        return list(self.images), None
+
     def _load_thumbs(self):
-        for p in self.images[:12]:
+        fronts, backs = self._sheet_images()
+        wanted = list(fronts[:12]) + [b for b in (backs or [])[:12] if b]
+        for p in wanted:
+            key = str(p)
+            if key in self._thumbs:
+                continue
             try:
-                t = PILImage.open(p).convert("RGB").resize((200, 279))
-                self._thumbs[str(p)] = t
-            except OSError:
+                self._thumbs[key] = PILImage.open(p).convert("RGB").resize(
+                    (200, 279))
+            except (OSError, ValueError):
                 continue
         try:
             self.after(0, self._draw_preview)
@@ -992,6 +1020,8 @@ class ExportDialog(ctk.CTkToplevel):
                 self.after_cancel(self._prev_job)
             except Exception:
                 pass
+        # duplex on/off changes which files are needed as thumbnails
+        threading.Thread(target=self._load_thumbs, daemon=True).start()
         self._prev_job = self.after(200, self._draw_preview)
 
     def _draw_preview(self):
@@ -1006,6 +1036,10 @@ class ExportDialog(ctk.CTkToplevel):
         d = PILDraw.Draw(img)
 
         per_page = cols * rows
+        fronts, backs = self._sheet_images()
+        duplex = backs is not None
+        showing_backs = duplex and self.side_btn.get() == "Backs"
+        page_items = backs if showing_backs else fronts
         eb = self._edge_bleed()
         g = 2 * eb
         bw = cols * 63 + (cols - 1) * g
@@ -1026,19 +1060,25 @@ class ExportDialog(ctk.CTkToplevel):
         # bleed frames + cards
         for idx in range(per_page):
             col, rw = idx % cols, idx // cols
+            # backs print column-mirrored so they land behind their front
+            slot = rw * cols + (cols - 1 - col) if showing_backs else idx
             x = left + col * (63 + g)
             y = top + rw * (88 + g)
-            if idx < len(self.images):
+            if slot < len(page_items):
                 if eb > 0:
                     d.rectangle([X(x - eb), X(y - eb),
                                  X(x + 63 + eb), X(y + 88 + eb)],
                                 fill=bleed_fill, outline=(210, 210, 215))
-                t = self._thumbs.get(str(self.images[idx]))
+                item = page_items[slot]
+                t = self._thumbs.get(str(item)) if item else None
                 if t:
                     img.paste(t.resize((cw, ch)), (X(x), X(y)))
                 else:
                     d.rectangle([X(x), X(y), X(x + 63), X(y + 88)],
                                 fill=(55, 60, 76))
+                    if showing_backs and not item:
+                        d.text((X(x) + cw // 2 - 26, X(y) + ch // 2),
+                               "back.png\nmissing", fill=(190, 120, 120))
 
         # guide crosses
         gc = {"White": (255, 255, 255), "Black": (0, 0, 0),
@@ -1069,9 +1109,19 @@ class ExportDialog(ctk.CTkToplevel):
         self._preview_img = ctk.CTkImage(light_image=img, dark_image=img,
                                          size=(W, H))
         self.preview_label.configure(image=self._preview_img, text="")
-        pages = -(-len(self.images) // per_page)
-        self.preview_title.configure(
-            text=f"Preview - page 1 of {pages} (fronts)")
+
+        sheets = -(-len(fronts) // per_page)          # sheets of paper
+        pages = sheets * 2 if duplex else sheets      # PDF pages
+        side = "backs, mirrored" if showing_backs else "fronts"
+        self.preview_title.configure(text=f"Sheet 1 of {sheets} — {side}")
+        self.side_btn.configure(state="normal" if duplex else "disabled")
+        if not duplex:
+            self.side_btn.set("Fronts")
+
+        extra = f" ({len(self.images)} files, backs paired)" if duplex else ""
+        self.summary.configure(
+            text=f"{len(fronts)} card(s) from the {self.source}{extra} -> "
+                 f"{sheets} sheet(s), {pages} PDF page(s)")
 
     # ------------------------------------------------------------- actions
     def _export(self):
