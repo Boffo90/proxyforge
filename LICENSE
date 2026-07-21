@@ -1,21 +1,45 @@
-MIT License
+ProxyForge — Source-Available License
+Copyright (c) 2026 Boffo90. All rights reserved.
 
-Copyright (c) 2026 Volcan Proxies
+The source code in this repository is published so that anyone can read
+and audit it. It is NOT open source: the permissions below are limited.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+YOU MAY
+  1. Download and use the official ProxyForge builds, free of charge, for
+     personal use.
+  2. Read, study and audit this source code.
+  3. Build it from source for your own personal use.
+  4. Quote short excerpts when reporting a bug or proposing a change.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+YOU MAY NOT, without prior written permission from the copyright holder
+  1. Redistribute this software or its builds, in whole or in part,
+     modified or unmodified, by any means or on any platform.
+  2. Publish, release or share a modified version, fork or derivative
+     work, including one under a different name or branding.
+  3. Sell, license, rent or otherwise commercialise this software, its
+     builds or any derivative of it, or bundle it into a paid product or
+     service.
+  4. Remove or alter the ProxyForge name, icon, authorship or this
+     licence.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+CONTRIBUTIONS
+  Pull requests and bug reports are welcome. By submitting a
+  contribution you agree that it is licensed to the copyright holder for
+  inclusion in this project under the terms of this licence.
+
+THIRD-PARTY COMPONENTS
+  ProxyForge downloads its AI engine and models at runtime from their
+  official sources; those components keep their own licences and are not
+  covered by this one. See the README for details. The Python libraries
+  it is built with likewise remain under their respective licences.
+
+NO WARRANTY
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+  THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For permissions beyond this licence, contact the author through
+https://github.com/Boffo90/proxyforge

@@ -47,6 +47,14 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Licence
+
+ProxyForge is **free to use** but it is **not open source**. The code is
+published so anyone can read and audit what the app does — you are welcome
+to study it, build it for your own use, and send bug reports or pull
+requests. You may not redistribute it, publish a modified or rebranded
+version, or sell it. See [LICENSE](LICENSE).
+
 ## Legal
 
 - This is an unofficial Fan Content project, not affiliated with or
