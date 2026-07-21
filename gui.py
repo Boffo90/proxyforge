@@ -8,6 +8,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
+import numpy as np
 from PIL import Image as PILImage, ImageDraw as PILDraw
 
 try:
@@ -771,7 +772,10 @@ class ExportDialog(ctk.CTkToplevel):
         self.after(60, self.grab_set)
         self.configure(fg_color=BG)
 
-        self._thumbs = {}
+        self._thumbs = {}          # path -> raw thumbnail
+        self._thumbs_b = {}        # path -> thumbnail with the border treated
+        self._border_modes = {}    # path -> "auto" | "on" | "off"
+        self._slots = []           # preview hit-boxes: (x0, y0, x1, y1, path)
         self._prev_job = None
         self._preview_img = None
 
@@ -911,6 +915,11 @@ class ExportDialog(ctk.CTkToplevel):
         self.preview_label = ctk.CTkLabel(right, text="Loading preview...",
                                           text_color=MUTED)
         self.preview_label.grid(row=1, column=0, pady=(0, 10))
+        self.preview_label.bind("<Button-1>", self._preview_click)
+        ctk.CTkLabel(right, text="Click a card to cycle its black border:  "
+                     "auto → force off → force on",
+                     text_color=MUTED, font=("Segoe UI", 11)).grid(
+            row=2, column=0, pady=(0, 8))
 
         # ------------------------------------------------ bottom buttons
         btns = ctk.CTkFrame(self, fg_color="transparent")
@@ -1010,8 +1019,16 @@ class ExportDialog(ctk.CTkToplevel):
             if key in self._thumbs:
                 continue
             try:
-                self._thumbs[key] = PILImage.open(p).convert("RGB").resize(
-                    (200, 279))
+                src = PILImage.open(p).convert("RGBA")
+                # treat at a workable size so detection behaves like it will
+                # at full resolution, then shrink for display
+                mid = src.resize((420, 586))
+                flat = PILImage.new("RGB", mid.size, (0, 0, 0))
+                flat.paste(mid, mask=mid.split()[3])
+                self._thumbs[key] = flat.resize((200, 279))
+                opaque = np.asarray(mid.split()[3]) > 250
+                self._thumbs_b[key] = print_sheet._deepen_black_border(
+                    flat, opaque).resize((200, 279))
             except (OSError, ValueError):
                 continue
         try:
@@ -1041,6 +1058,8 @@ class ExportDialog(ctk.CTkToplevel):
         d = PILDraw.Draw(img)
 
         per_page = cols * rows
+        self._slots = []
+        border_on = self.border.get() != BORDER_MODES[0]
         fronts, backs = self._sheet_images()
         duplex = backs is not None
         showing_backs = duplex and self.side_btn.get() == "Backs"
@@ -1075,9 +1094,20 @@ class ExportDialog(ctk.CTkToplevel):
                                  X(x + 63 + eb), X(y + 88 + eb)],
                                 fill=bleed_fill, outline=(210, 210, 215))
                 item = page_items[slot]
-                t = self._thumbs.get(str(item)) if item else None
+                key = str(item) if item else None
+                mode = self._border_modes.get(key, "auto")
+                treated = mode == "on" or (mode == "auto" and border_on)
+                pool = self._thumbs_b if treated else self._thumbs
+                t = (pool.get(key) or self._thumbs.get(key)) if key else None
                 if t:
                     img.paste(t.resize((cw, ch)), (X(x), X(y)))
+                    self._slots.append((X(x), X(y), X(x + 63), X(y + 88), key))
+                    if mode != "auto":
+                        col = (90, 190, 110) if mode == "on" else (210, 110, 110)
+                        d.rectangle([X(x) + 3, X(y) + 3, X(x) + 36, X(y) + 18],
+                                    fill=col)
+                        d.text((X(x) + 8, X(y) + 5),
+                               "ON" if mode == "on" else "OFF", fill=(15, 15, 20))
                 else:
                     d.rectangle([X(x), X(y), X(x + 63), X(y + 88)],
                                 fill=(55, 60, 76))
@@ -1128,6 +1158,21 @@ class ExportDialog(ctk.CTkToplevel):
             text=f"{len(fronts)} card(s) from the {self.source}{extra} -> "
                  f"{sheets} sheet(s), {pages} PDF page(s)")
 
+    def _preview_click(self, event):
+        """Cycle one card's black border: auto -> force off -> force on."""
+        if not self._preview_img:
+            return
+        iw, ih = self._preview_img.cget("size")        # image is centred
+        ox = max(0, (self.preview_label.winfo_width() - iw) // 2)
+        oy = max(0, (self.preview_label.winfo_height() - ih) // 2)
+        px, py = event.x - ox, event.y - oy
+        nxt = {"auto": "off", "off": "on", "on": "auto"}
+        for x0, y0, x1, y1, key in self._slots:
+            if key and x0 <= px <= x1 and y0 <= py <= y1:
+                self._border_modes[key] = nxt[self._border_modes.get(key, "auto")]
+                self._draw_preview()
+                return
+
     # ------------------------------------------------------------- actions
     def _export(self):
         target = filedialog.asksaveasfilename(
@@ -1156,6 +1201,7 @@ class ExportDialog(ctk.CTkToplevel):
             profile_id=self._profile_id(),
             shadow_name=self.shadow.get(),
             deepen_border=self.border.get() != BORDER_MODES[0],
+            border_modes=dict(self._border_modes),
             pages_per_file=PAGES_PER_FILE.get(self.split.get(), 0),
             backs=backs,
             back_offset=self._offsets(),

@@ -445,7 +445,7 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
               pages_per_file=0, backs=None, back_offset=(0.0, 0.0),
               back_bleed_mm=1.5, shift_down_mm=0.0,
               edge_bleed_mm=0.0, bleed_color="Black", guide_color="White",
-              layout=DEFAULT_LAYOUT, deepen_border=False,
+              layout=DEFAULT_LAYOUT, deepen_border=False, border_modes=None,
               status_callback=None) -> list[Path]:
     """
     Compose `images` (paths, in order) into one or more print-sheet PDFs.
@@ -520,11 +520,16 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
     written = []
     flat_cache = {}
 
+    modes = border_modes or {}
+
     def flat(img):
-        key = str(img)
+        # "auto" follows the global switch; "on"/"off" are per-card overrides
+        mode = modes.get(str(img), "auto")
+        do_border = deepen_border if mode == "auto" else (mode == "on")
+        key = (str(img), do_border)
         if key not in flat_cache:
             flat_cache[key] = _flatten(img, jpeg_quality, profile, sharpen,
-                                       shadow, deepen_border)
+                                       shadow, do_border)
         return flat_cache[key]
 
     placed = 0
