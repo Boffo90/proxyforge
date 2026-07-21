@@ -135,57 +135,82 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
     `opaque` is a bool mask of non-transparent pixels (the PNG's rounded
     corners must be excluded or every card would look black-bordered).
     """
-    a = np.asarray(im, dtype=np.float32)
-    h, w = a.shape[:2]
-    gray = a @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    w, h = im.size
+
+    # Analysis runs on a small copy: detection and border-depth profiling
+    # need proportions, not pixels, and doing it full-size costs ~1s a card.
+    scale = max(1, round(w / 420))
+    sw, sh = w // scale, h // scale
+    small = np.asarray(im.resize((sw, sh), Image.BILINEAR), dtype=np.float32)
+    sgray = small @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    sop = None
+    if opaque is not None:
+        sop = np.asarray(
+            Image.fromarray(opaque).resize((sw, sh), Image.NEAREST))
 
     # ---- guard 1: is this actually a uniform black border?
-    t = max(2, int(w * BORDER_RING_FRAC))
-    ring = np.zeros((h, w), dtype=bool)
+    t = max(2, int(sw * BORDER_RING_FRAC))
+    ring = np.zeros((sh, sw), dtype=bool)
     ring[:t, :] = ring[-t:, :] = True
     ring[:, :t] = ring[:, -t:] = True
-    if opaque is not None:
-        ring &= opaque
-    vals = gray[ring]
+    if sop is not None:
+        ring &= sop
+    vals = sgray[ring]
     if vals.size == 0:
         return im
     p50, p90 = (float(x) for x in np.percentile(vals, (50, 90)))
     if p50 > BORDER_MAX_LEVEL or (p90 - p50) > BORDER_MAX_SPREAD:
         return im
 
-    # ---- distance from the nearest edge, in pixels
-    yy = np.arange(h, dtype=np.float32)[:, None]
-    xx = np.arange(w, dtype=np.float32)[None, :]
-    dist = np.minimum(np.minimum(xx, w - 1 - xx), np.minimum(yy, h - 1 - yy))
-
-    # ---- how deep does the uniform dark border really go?
-    # walk outwards-in and stop where the ring stops being border-dark
-    limit = int(w * BORDER_MAX_WIDTH)
+    # ---- how deep does the uniform dark border really go? (on the small copy)
+    syy = np.arange(sh, dtype=np.float32)[:, None]
+    sxx = np.arange(sw, dtype=np.float32)[None, :]
+    sdist = np.minimum(np.minimum(sxx, sw - 1 - sxx),
+                       np.minimum(syy, sh - 1 - syy))
+    limit = int(sw * BORDER_MAX_WIDTH)
     cutoff = p90 + 22
-    border_px = limit
-    step = max(1, limit // 30)
-    for d in range(t, limit, step):
-        shell = (dist >= d) & (dist < d + 2)
-        if opaque is not None:
-            shell &= opaque
-        v = gray[shell]
+    border_small = limit
+    for d in range(t, limit):
+        shell = (sdist >= d) & (sdist < d + 1)
+        if sop is not None:
+            shell &= sop
+        v = sgray[shell]
         if v.size and float(np.percentile(v, 60)) > cutoff:
-            border_px = d
+            border_small = d
             break
+    border_px = border_small * scale
 
-    # ---- guard 2: spatial weight (full inside the border, then fades)
     fade = max(2.0, w * BORDER_FADE_FRAC)
-    spatial = np.clip((border_px + fade - dist) / fade, 0.0, 1.0)
-
-    # ---- guard 3: tonal weight (only already-dark pixels)
     black_point = min(p90 + 6, BORDER_TONE_MAX - 5)
-    tonal = np.clip((BORDER_TONE_MAX - gray) / (BORDER_TONE_MAX - black_point),
-                    0.0, 1.0)
+    k = 255.0 / (255.0 - black_point)
+    lum = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
-    weight = (spatial * tonal)[..., None]
-    scaled = np.clip((a - black_point) * (255.0 / (255.0 - black_point)), 0, 255)
-    out = a * (1.0 - weight) + scaled * weight
-    return Image.fromarray(out.astype(np.uint8), "RGB")
+    # Only the frame band can change (spatial weight is 0 further in), so we
+    # touch ~3M pixels instead of 12M.
+    band = min(int(border_px + fade) + 2, min(h, w) // 2)
+    arr = np.array(im, dtype=np.uint8)
+
+    def treat(y0, y1, x0, x1):
+        sub = arr[y0:y1, x0:x1].astype(np.float32)
+        yy = np.arange(y0, y1, dtype=np.float32)[:, None]
+        xx = np.arange(x0, x1, dtype=np.float32)[None, :]
+        dist = np.minimum(np.minimum(xx, w - 1 - xx),
+                          np.minimum(yy, h - 1 - yy))
+        # ---- guard 2: spatial weight (full inside the border, then fades)
+        spatial = np.clip((border_px + fade - dist) / fade, 0.0, 1.0)
+        # ---- guard 3: tonal weight (only already-dark pixels)
+        tonal = np.clip((BORDER_TONE_MAX - sub @ lum) /
+                        (BORDER_TONE_MAX - black_point), 0.0, 1.0)
+        weight = (spatial * tonal)[..., None]
+        scaled = np.clip((sub - black_point) * k, 0, 255)
+        arr[y0:y1, x0:x1] = (sub * (1.0 - weight) + scaled * weight).astype(
+            np.uint8)
+
+    treat(0, band, 0, w)
+    treat(h - band, h, 0, w)
+    treat(band, h - band, 0, band)
+    treat(band, h - band, w - band, w)
+    return Image.fromarray(arr, "RGB")
 
 
 def _flatten(png_path: Path, jpeg_quality, profile=None, sharpen=None,
