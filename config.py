@@ -216,6 +216,11 @@ BORDER_MODES = ["Off", "On (auto-detect)"]
 
 BORDER_DEFAULT = "On (auto-detect)"
 
+# Strength of the effect, and the width used for cards you force ON when
+# detection cannot tell frame from art (0 = keep measuring).
+BORDER_AMOUNT_DEFAULT = 100      # percent
+BORDER_WIDTH_DEFAULT = 0.0       # percent of card width
+
 # ==========================================
 # DUPLEX BACKS
 # ==========================================

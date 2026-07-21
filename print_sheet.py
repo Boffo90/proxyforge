@@ -165,14 +165,23 @@ def _apply_profile(im: Image.Image, profile, shadow=0) -> Image.Image:
     return im
 
 
-def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
+def _deepen_black_border(im: Image.Image, opaque=None, amount: float = 1.0,
+                         manual_width: float = 0.0) -> Image.Image:
     """
     Snap a washed-out black border to true black. Returns the image
     unchanged unless the card's perimeter is uniformly dark.
 
     `opaque` is a bool mask of non-transparent pixels (the PNG's rounded
     corners must be excluded or every card would look black-bordered).
+
+    amount        0..1, how far towards true black the frame is pushed.
+    manual_width  >0 skips detection and treats this fraction of the card
+                  width on all four edges — for cards where the artwork
+                  reaches the cut edge and no measurement can tell frame
+                  from art.
     """
+    if amount <= 0:
+        return im
     w, h = im.size
     arr = np.array(im, dtype=np.uint8)
     lum = np.array([0.299, 0.587, 0.114], dtype=np.float32)
@@ -213,8 +222,25 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
         (flip(tr(right_s[0])), flip(tr(right_s[1])), flip(tr(right_s[2]))),
     ]
 
-    # ---- what level does this card's black frame sit at?
     t = max(2, int(min(w, h) * BORDER_RING_FRAC))
+
+    if manual_width > 0:
+        # user-set width: uniform depth on every edge, no detection at all
+        depth = manual_width * w
+        prof_top = np.full(w, depth, np.float32)
+        prof_bot = np.full(w, depth, np.float32)
+        prof_left = np.full(h, depth, np.float32)
+        prof_right = np.full(h, depth, np.float32)
+        ring = []
+        for lines, _c, masks in edges:
+            band = lines[:t]
+            ring.append(band[masks[:t]] if masks is not None else band.ravel())
+        vals = np.concatenate(ring)
+        black = float(np.percentile(vals, 60)) if vals.size else 0.0
+        return _apply_border(im, arr, w, h, lum, black,
+                             prof_top, prof_bot, prof_left, prof_right, amount)
+
+    # ---- what level does this card's black frame sit at?
     perim, perim_c = [], []
     for lines, chroma, masks in edges:
         band, cband = lines[:t], chroma[:t]
@@ -282,12 +308,18 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
     prof_left, prof_right = (expand(edge_profile(*e), h) for e in edges[2:])
     if not any(p.max() > 0 for p in (prof_top, prof_bot, prof_left, prof_right)):
         return im
-    p90 = black + BORDER_LEVEL_TOL
 
+    return _apply_border(im, arr, w, h, lum, black,
+                         prof_top, prof_bot, prof_left, prof_right, amount)
+
+
+def _apply_border(im, arr, w, h, lum, black,
+                  prof_top, prof_bot, prof_left, prof_right, amount):
+    """Blend the frame towards true black using the per-line depth profiles."""
     fade = max(2.0, w * BORDER_FADE_FRAC)
-    black_point = min(p90 + 6, BORDER_TONE_MAX - 5)
+    black_point = min(black + BORDER_LEVEL_TOL + 6, BORDER_TONE_MAX - 5)
     k = 255.0 / (255.0 - black_point)
-    lum = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    amount = float(np.clip(amount, 0.0, 1.0))
 
     # Only the frame band can change (spatial weight is 0 further in), so we
     # touch a fraction of the pixels. Each side spans its own deepest run.
@@ -304,12 +336,10 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
         sub = arr[y0:y1, x0:x1].astype(np.float32)
         yy = np.arange(y0, y1, dtype=np.float32)[:, None]
         xx = np.arange(x0, x1, dtype=np.float32)[None, :]
-        # ---- guard 2: spatial weight. Each edge contributes its own
-        # per-line depth, so a side that is artwork along part of its length
-        # and a black frame along the rest is handled correctly.
+        # ---- guard 2: spatial weight, per line, so a side that is artwork
+        # along part of its length and frame along the rest works out.
         # `* (p > 0)` matters: without it a line with no frame at all would
-        # still get full weight at the very edge and fade in over `fade`
-        # pixels, darkening the outermost millimetre of artwork.
+        # still get full weight at the very edge.
         def term(p, dist):
             return np.clip((p + fade - dist) / fade, 0.0, 1.0) * (p > 0)
 
@@ -323,7 +353,7 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
         # ---- guard 3: tonal weight (only already-dark pixels)
         tonal = np.clip((BORDER_TONE_MAX - sub @ lum) /
                         (BORDER_TONE_MAX - black_point), 0.0, 1.0)
-        weight = (spatial * tonal)[..., None]
+        weight = (spatial * tonal * amount)[..., None]
         scaled = np.clip((sub - black_point) * k, 0, 255)
         arr[y0:y1, x0:x1] = (sub * (1.0 - weight) + scaled * weight).astype(
             np.uint8)
@@ -341,7 +371,8 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
 
 
 def _flatten(png_path: Path, jpeg_quality, profile=None, sharpen=None,
-             shadow=0, deepen_border=False, suffix="_sheet") -> Path:
+             shadow=0, deepen_border=False, border_amount=1.0,
+             border_width=0.0, suffix="_sheet") -> Path:
     """
     Flatten transparent rounded corners onto black, apply the print-time
     adjustments, and write the temp file the PDF will embed.
@@ -362,7 +393,7 @@ def _flatten(png_path: Path, jpeg_quality, profile=None, sharpen=None,
     if deepen_border:
         # last, so it also undoes the shadow lift inside the border
         opaque = np.asarray(alpha) > 250
-        bg = _deepen_black_border(bg, opaque)
+        bg = _deepen_black_border(bg, opaque, border_amount, border_width)
 
     if jpeg_quality is None:
         out = TEMP_FOLDER / (png_path.stem + suffix + ".png")
@@ -446,6 +477,7 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
               back_bleed_mm=1.5, shift_down_mm=0.0,
               edge_bleed_mm=0.0, bleed_color="Black", guide_color="White",
               layout=DEFAULT_LAYOUT, deepen_border=False, border_modes=None,
+              border_amount=1.0, border_width=0.0,
               status_callback=None) -> list[Path]:
     """
     Compose `images` (paths, in order) into one or more print-sheet PDFs.
@@ -526,10 +558,13 @@ def build_pdf(images, out_path, page_name="A4", quality=PDF_DEFAULT_QUALITY,
         # "auto" follows the global switch; "on"/"off" are per-card overrides
         mode = modes.get(str(img), "auto")
         do_border = deepen_border if mode == "auto" else (mode == "on")
-        key = (str(img), do_border)
+        # a forced card uses the manual width, if one is set; auto cards
+        # always measure their own
+        width = border_width if mode == "on" else 0.0
+        key = (str(img), do_border, width)
         if key not in flat_cache:
             flat_cache[key] = _flatten(img, jpeg_quality, profile, sharpen,
-                                       shadow, do_border)
+                                       shadow, do_border, border_amount, width)
         return flat_cache[key]
 
     placed = 0

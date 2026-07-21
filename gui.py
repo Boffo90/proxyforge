@@ -40,6 +40,8 @@ from config import (
     SHADOW_DEFAULT,
     BORDER_MODES,
     BORDER_DEFAULT,
+    BORDER_AMOUNT_DEFAULT,
+    BORDER_WIDTH_DEFAULT,
     CALIBRATION_PROFILES,
     BACKS_MODES,
     find_back_image,
@@ -773,6 +775,7 @@ class ExportDialog(ctk.CTkToplevel):
         self.configure(fg_color=BG)
 
         self._thumbs = {}          # path -> raw thumbnail
+        self._thumbs_raw = {}      # path -> (mid-size flat image, alpha mask)
         self._thumbs_b = {}        # path -> thumbnail with the border treated
         self._border_modes = {}    # path -> "auto" | "on" | "off"
         self._slots = []           # preview hit-boxes: (x0, y0, x1, y1, path)
@@ -862,6 +865,31 @@ class ExportDialog(ctk.CTkToplevel):
                           s.get("shadow", SHADOW_DEFAULT))
         self.border = row("Deepen black border", BORDER_MODES,
                           s.get("border", BORDER_DEFAULT))
+
+        def slider_row(label, key, default, to, unit, fmt="{:.0f}"):
+            ctk.CTkLabel(left, text=label, anchor="w").grid(
+                row=self._r, column=0, sticky="w", padx=(12, 8), pady=4)
+            fr = ctk.CTkFrame(left, fg_color="transparent")
+            fr.grid(row=self._r, column=1, sticky="w", pady=4)
+            val = ctk.CTkLabel(fr, text="", width=54, text_color=MUTED,
+                               font=("Segoe UI", 11))
+            sl = ctk.CTkSlider(fr, from_=0, to=to, width=175,
+                               button_color=GOLD, progress_color=GOLD_HOVER,
+                               command=lambda v: (
+                                   val.configure(text=fmt.format(v) + unit),
+                                   self._refresh_preview()))
+            sl.set(float(s.get(key, default)))
+            val.configure(text=fmt.format(sl.get()) + unit)
+            sl.pack(side="left")
+            val.pack(side="left", padx=(6, 0))
+            self._r += 1
+            return sl
+
+        self.border_amount = slider_row("Amount", "border_amount",
+                                        BORDER_AMOUNT_DEFAULT, 100, "%")
+        self.border_width = slider_row("Manual width (forced cards)",
+                                       "border_width", BORDER_WIDTH_DEFAULT,
+                                       12, "%", "{:.1f}")
 
         section("Duplex backs")
         self.backs = row("Card backs", BACKS_MODES,
@@ -981,6 +1009,8 @@ class ExportDialog(ctk.CTkToplevel):
             "sharpen": self.sharpen.get(),
             "shadow": self.shadow.get(),
             "border": self.border.get(),
+            "border_amount": round(self.border_amount.get(), 1),
+            "border_width": round(self.border_width.get(), 1),
             "backs": self.backs.get(),
             "back_dx": dx,
             "back_dy": dy,
@@ -1027,8 +1057,8 @@ class ExportDialog(ctk.CTkToplevel):
                 flat.paste(mid, mask=mid.split()[3])
                 self._thumbs[key] = flat.resize((200, 279))
                 opaque = np.asarray(mid.split()[3]) > 250
-                self._thumbs_b[key] = print_sheet._deepen_black_border(
-                    flat, opaque).resize((200, 279))
+                self._thumbs_raw[key] = (flat, opaque)
+                self._thumbs_b[key] = self._treated_thumb(key)
             except (OSError, ValueError):
                 continue
         try:
@@ -1036,17 +1066,35 @@ class ExportDialog(ctk.CTkToplevel):
         except RuntimeError:
             pass
 
+    def _treated_thumb(self, key):
+        """Thumbnail with the border treated using the current sliders."""
+        pair = self._thumbs_raw.get(key)
+        if not pair:
+            return None
+        flat, opaque = pair
+        return print_sheet._deepen_black_border(
+            flat, opaque,
+            amount=self.border_amount.get() / 100.0,
+            manual_width=0.0).resize((200, 279))
+
     def _refresh_preview(self, *_):
         if self._prev_job:
             try:
                 self.after_cancel(self._prev_job)
             except Exception:
                 pass
-        # duplex on/off changes which files are needed as thumbnails
+        # sliders change the treated look; duplex changes which files matter
+        for k in list(self._thumbs_raw):
+            t = self._treated_thumb(k)
+            if t is not None:
+                self._thumbs_b[k] = t
         threading.Thread(target=self._load_thumbs, daemon=True).start()
         self._prev_job = self.after(200, self._draw_preview)
 
     def _draw_preview(self):
+        # a slider can leave a redraw queued; the dialog may be gone by then
+        if not self.winfo_exists():
+            return
         cols, rows, landscape = print_sheet.LAYOUTS.get(
             self.layout.get(), print_sheet.LAYOUTS[print_sheet.DEFAULT_LAYOUT])
         pw, ph = _PAGE_MM.get(self.page.get(), _PAGE_MM["A4"])
@@ -1158,6 +1206,15 @@ class ExportDialog(ctk.CTkToplevel):
             text=f"{len(fronts)} card(s) from the {self.source}{extra} -> "
                  f"{sheets} sheet(s), {pages} PDF page(s)")
 
+    def destroy(self):
+        if self._prev_job:
+            try:
+                self.after_cancel(self._prev_job)
+            except Exception:
+                pass
+            self._prev_job = None
+        super().destroy()
+
     def _preview_click(self, event):
         """Cycle one card's black border: auto -> force off -> force on."""
         if not self._preview_img:
@@ -1202,6 +1259,8 @@ class ExportDialog(ctk.CTkToplevel):
             shadow_name=self.shadow.get(),
             deepen_border=self.border.get() != BORDER_MODES[0],
             border_modes=dict(self._border_modes),
+            border_amount=self.border_amount.get() / 100.0,
+            border_width=self.border_width.get() / 100.0,
             pages_per_file=PAGES_PER_FILE.get(self.split.get(), 0),
             backs=backs,
             back_offset=self._offsets(),
