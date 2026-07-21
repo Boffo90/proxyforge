@@ -5,7 +5,7 @@
 ; Build:  ISCC installer.iss   (after building ProxyForge.exe)
 
 #define AppName "ProxyForge"
-#define AppVersion "2.2.3"
+#define AppVersion "2.2.4"
 #define AppExe "ProxyForge.exe"
 
 [Setup]

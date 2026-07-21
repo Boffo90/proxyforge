@@ -99,13 +99,38 @@ SHADOW_KNEE = 75
 # that wreck a standard deviation (one card measured std 22 off four white
 # pixels) while the median and p90 stay rock steady.
 BORDER_RING_FRAC = 0.03      # perimeter depth sampled for detection
-BORDER_MAX_LEVEL = 70        # median brighter than this -> not a black border
+BORDER_MAX_LEVEL = 60        # brighter than this -> not a black frame
 BORDER_MAX_SPREAD = 12       # p90-p50 above this -> art in the ring, skip card
 # A row of the black band still counts as border while its BACKGROUND sits at
 # the border level: the collector line ("U 0117 TDC - EN ...") is white text
 # on black, so a mid percentile jumps there and used to cut the scan short.
 BORDER_BG_PCT = 30           # percentile that represents a row's background
-BORDER_LEVEL_TOL = 12        # background may drift this far from the border
+BORDER_LEVEL_TOL = 8         # a pixel is frame while it stays this close
+BORDER_MIN_SHARE = 0.05      # perimeter this dark at least, or there's no frame
+BORDER_MIN_DEPTH = 6         # shorter runs are noise, not a frame
+BORDER_SMOOTH = 25           # median window along an edge, in pixels
+BORDER_ALONG_STEP = 4        # scan every Nth line along an edge
+# The gap that ends the frame must be longer than the collector text, whose
+# letters are ~40px tall at print resolution: a column crossing a letter
+# used to stop there while its neighbour ran on, leaving black streaks up
+# into the artwork. Overshooting into bright content is harmless (the tonal
+# guard leaves it alone).
+BORDER_BREAK_FRAC = 0.02     # gap that ends the frame, fraction of width
+# A black frame is neutral; coloured artwork is not. Measured on the bottom
+# band: real frames sit at chroma 1-6, the brown wood of a full-art card at
+# 43. Without this, a dark uniform artwork forms its own histogram peak and
+# gets crushed to black.
+BORDER_MAX_CHROMA = 14       # max(RGB)-min(RGB) allowed for frame pixels
+
+
+def _smooth_profile(profile: np.ndarray, k: int = BORDER_SMOOTH) -> np.ndarray:
+    """Median filter along an edge so single noisy lines can't cut a notch."""
+    if profile.size <= k or k < 3:
+        return profile
+    pad = k // 2
+    padded = np.pad(profile, pad, mode="edge")
+    windows = np.lib.stride_tricks.sliding_window_view(padded, k)
+    return np.median(windows, axis=1).astype(np.float32)
 # Each edge is measured on its own: MDFCs and similar carry a much taller
 # bottom border (295px vs 116px at the sides on Agadeem's Awakening), and a
 # single shared depth leaves a visible step where treated black meets
@@ -157,58 +182,107 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
     # Scanning happens at native resolution: on a downscaled copy the white
     # collector text bleeds into the black band and stops the scan there.
     # Only the four edge strips are converted, never the whole card.
-    def strip(sl_y, sl_x):
-        g = arr[sl_y, sl_x].astype(np.float32) @ lum
-        m = opaque[sl_y, sl_x] if opaque is not None else None
-        return g, m
+    # Depth is measured at full resolution, but only every Nth line ALONG the
+    # edge is scanned: the frame's depth changes slowly, and the profile is
+    # median-smoothed afterwards anyway. Cuts the work ~4x.
+    step = BORDER_ALONG_STEP
 
-    g_top, m_top = strip(slice(0, lim_v), slice(None))
-    g_bot, m_bot = strip(slice(h - lim_v, h), slice(None))
-    g_left, m_left = strip(slice(None), slice(0, lim_h))
-    g_right, m_right = strip(slice(None), slice(w - lim_h, w))
+    def strip(sl_y, sl_x):
+        px = arr[sl_y, sl_x].astype(np.float32)
+        g = px @ lum
+        c = px.max(axis=2) - px.min(axis=2)      # chroma: 0 = neutral grey
+        m = opaque[sl_y, sl_x] if opaque is not None else None
+        return g, c, m
+
+    top_s = strip(slice(0, lim_v), slice(None, None, step))
+    bot_s = strip(slice(h - lim_v, h), slice(None, None, step))
+    left_s = strip(slice(None, None, step), slice(0, lim_h))
+    right_s = strip(slice(None, None, step), slice(w - lim_h, w))
+
+    def flip(x):
+        return None if x is None else x[::-1]
+
+    def tr(x):
+        return None if x is None else x.T
 
     # lines ordered from the edge inwards, so depth == index
     edges = [
-        (g_top, m_top),
-        (g_bot[::-1], None if m_bot is None else m_bot[::-1]),
-        (g_left.T, None if m_left is None else m_left.T),
-        (g_right.T[::-1], None if m_right is None else m_right.T[::-1]),
+        (top_s[0], top_s[1], top_s[2]),
+        (flip(bot_s[0]), flip(bot_s[1]), flip(bot_s[2])),
+        (tr(left_s[0]), tr(left_s[1]), tr(left_s[2])),
+        (flip(tr(right_s[0])), flip(tr(right_s[1])), flip(tr(right_s[2]))),
     ]
 
-    # ---- guard 1, per edge: each side decides on its own whether it is a
-    # uniform black border, and how deep it goes. Judging the card as a whole
-    # would discard styles that are art on three sides with a black band at
-    # the bottom (Special Guest printings), leaving that band grey.
+    # ---- what level does this card's black frame sit at?
     t = max(2, int(min(w, h) * BORDER_RING_FRAC))
-
-    def edge_depth(lines, masks, level) -> int:
-        limit = lines.shape[0]
-        for d in range(t, limit):
-            v = lines[d][masks[d]] if masks is not None else lines[d]
-            if v.size < 8:
-                continue
-            if abs(float(np.percentile(v, BORDER_BG_PCT)) - level) > BORDER_LEVEL_TOL:
-                return d
-        return limit
-
-    depths, levels = [], []
-    for lines, masks in edges:
-        band = lines[:t]
-        v = band[masks[:t]] if masks is not None else band.ravel()
-        if v.size == 0:
-            depths.append(None)
-            continue
-        e50, e90 = (float(x) for x in np.percentile(v, (50, 90)))
-        if e50 > BORDER_MAX_LEVEL or (e90 - e50) > BORDER_MAX_SPREAD:
-            depths.append(None)          # art reaches this edge: hands off
-            continue
-        depths.append(edge_depth(lines, masks, e50))
-        levels.append(e90)
-
-    if not levels:                       # no black-bordered edge at all
+    perim, perim_c = [], []
+    for lines, chroma, masks in edges:
+        band, cband = lines[:t], chroma[:t]
+        if masks is not None:
+            perim.append(band[masks[:t]]); perim_c.append(cband[masks[:t]])
+        else:
+            perim.append(band.ravel()); perim_c.append(cband.ravel())
+    perim = np.concatenate(perim)
+    perim_c = np.concatenate(perim_c)
+    if perim.size == 0:
         return im
-    top_px, bot_px, left_px, right_px = depths
-    p90 = max(levels)
+    # frame candidates: dark AND neutral
+    dark = perim[(perim <= BORDER_MAX_LEVEL) & (perim_c <= BORDER_MAX_CHROMA)]
+    if dark.size < perim.size * BORDER_MIN_SHARE:
+        return im                        # nothing frame-like around the card
+    # The frame is a big area sitting at one exact level, so it shows up as a
+    # spike in the histogram. Take that peak, not the median: dark artwork
+    # around the edges drags a median away from it (measured on Solitude SPG,
+    # frame at 29 but median 33, close enough to the navy sky at 44 to start
+    # eating the art).
+    hist, bins = np.histogram(dark, bins=np.arange(0, BORDER_MAX_LEVEL + 3, 2))
+    peak = int(np.argmax(hist))
+    # count the bins next to the peak too: a frame's level straddles a bin
+    # boundary often enough that a single bin under-counts it by half
+    share = hist[max(0, peak - 1):peak + 2].sum()
+    if share < perim.size * BORDER_MIN_SHARE:
+        return im                        # no dominant dark level
+    near = dark[(dark >= bins[peak] - 2) & (dark <= bins[peak + 1] + 2)]
+    black = float(np.median(near))
+
+    # ---- how deep is the black frame along EVERY line of every edge?
+    # One depth per edge is still too coarse: on Special Guest printings a
+    # side is artwork along its top half and a real black frame beside the
+    # text box, so the whole side used to be discarded. A pixel counts as
+    # frame while it stays at the card's black level; transparent corner
+    # pixels don't break the run (they are already black).
+    def edge_profile(lines, chroma, masks):
+        ok = (np.abs(lines - black) <= BORDER_LEVEL_TOL) &              (chroma <= BORDER_MAX_CHROMA)
+        if masks is not None:
+            ok |= ~masks
+        # The frame ends where several CONSECUTIVE pixels leave its level.
+        # A single stray pixel must not end it: cards carry one or two
+        # anti-aliased pixels right at the cut edge (measured 15, 53, 29, 15,
+        # 15 ... on Bloodstained Mire), which used to stop the scan at once
+        # and leave the rest of the band untreated.
+        n = lines.shape[0]
+        brk = max(6, int(w * BORDER_BREAK_FRAC))
+        if n <= brk:
+            return np.zeros(lines.shape[1], dtype=np.float32)
+        # rolling count of off-level pixels via a cumulative sum: a sliding
+        # window view here costs brk times more work for the same answer
+        bad = (~ok).astype(np.int32)
+        cs = np.cumsum(bad, axis=0)
+        zero = np.zeros((1, bad.shape[1]), np.int32)
+        ends = (cs[brk - 1:] - np.concatenate([zero, cs[:n - brk]])) == brk
+        depth = np.argmax(ends, axis=0).astype(np.float32)
+        depth[~ends.any(axis=0)] = n
+        depth[depth < BORDER_MIN_DEPTH] = 0.0
+        return _smooth_profile(depth, max(3, BORDER_SMOOTH // step))
+
+    def expand(profile, size):
+        return np.repeat(profile, step)[:size].astype(np.float32)
+
+    prof_top, prof_bot = (expand(edge_profile(*e), w) for e in edges[:2])
+    prof_left, prof_right = (expand(edge_profile(*e), h) for e in edges[2:])
+    if not any(p.max() > 0 for p in (prof_top, prof_bot, prof_left, prof_right)):
+        return im
+    p90 = black + BORDER_LEVEL_TOL
 
     fade = max(2.0, w * BORDER_FADE_FRAC)
     black_point = min(p90 + 6, BORDER_TONE_MAX - 5)
@@ -216,31 +290,36 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
     lum = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
     # Only the frame band can change (spatial weight is 0 further in), so we
-    # touch ~3M pixels instead of 12M. Each side gets its own band.
-    def band_of(depth, size):
-        return 0 if depth is None else min(int(depth + fade) + 2, size // 2)
+    # touch a fraction of the pixels. Each side spans its own deepest run.
+    def band_of(profile, size):
+        d = float(profile.max())
+        return 0 if d <= 0 else min(int(d + fade) + 2, size // 2)
 
-    tb = band_of(top_px, h)
-    bb = band_of(bot_px, h)
-    lb = band_of(left_px, w)
-    rb = band_of(right_px, w)
+    tb = band_of(prof_top, h)
+    bb = band_of(prof_bot, h)
+    lb = band_of(prof_left, w)
+    rb = band_of(prof_right, w)
 
     def treat(y0, y1, x0, x1):
         sub = arr[y0:y1, x0:x1].astype(np.float32)
         yy = np.arange(y0, y1, dtype=np.float32)[:, None]
         xx = np.arange(x0, x1, dtype=np.float32)[None, :]
-        # ---- guard 2: spatial weight, only from the edges that qualified,
-        # each with its own depth (an MDFC's bottom band runs far deeper
-        # than its sides)
-        shape = (y1 - y0, x1 - x0)
-        terms = []
-        for depth, d_from_edge in ((top_px, yy), (bot_px, h - 1 - yy),
-                                   (left_px, xx), (right_px, w - 1 - xx)):
-            if depth is None:
-                continue
-            terms.append(np.broadcast_to(
-                np.clip((depth + fade - d_from_edge) / fade, 0.0, 1.0), shape))
-        spatial = np.maximum.reduce(terms)
+        # ---- guard 2: spatial weight. Each edge contributes its own
+        # per-line depth, so a side that is artwork along part of its length
+        # and a black frame along the rest is handled correctly.
+        # `* (p > 0)` matters: without it a line with no frame at all would
+        # still get full weight at the very edge and fade in over `fade`
+        # pixels, darkening the outermost millimetre of artwork.
+        def term(p, dist):
+            return np.clip((p + fade - dist) / fade, 0.0, 1.0) * (p > 0)
+
+        terms = [
+            term(prof_top[None, x0:x1], yy),
+            term(prof_bot[None, x0:x1], h - 1 - yy),
+            term(prof_left[y0:y1, None], xx),
+            term(prof_right[y0:y1, None], w - 1 - xx),
+        ]
+        spatial = np.maximum.reduce(np.broadcast_arrays(*terms))
         # ---- guard 3: tonal weight (only already-dark pixels)
         tonal = np.clip((BORDER_TONE_MAX - sub @ lum) /
                         (BORDER_TONE_MAX - black_point), 0.0, 1.0)
