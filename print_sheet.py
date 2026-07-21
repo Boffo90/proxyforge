@@ -101,6 +101,11 @@ SHADOW_KNEE = 75
 BORDER_RING_FRAC = 0.03      # perimeter depth sampled for detection
 BORDER_MAX_LEVEL = 70        # median brighter than this -> not a black border
 BORDER_MAX_SPREAD = 12       # p90-p50 above this -> art in the ring, skip card
+# A row of the black band still counts as border while its BACKGROUND sits at
+# the border level: the collector line ("U 0117 TDC - EN ...") is white text
+# on black, so a mid percentile jumps there and used to cut the scan short.
+BORDER_BG_PCT = 30           # percentile that represents a row's background
+BORDER_LEVEL_TOL = 12        # background may drift this far from the border
 # Each edge is measured on its own: MDFCs and similar carry a much taller
 # bottom border (295px vs 116px at the sides on Agadeem's Awakening), and a
 # single shared depth leaves a visible step where treated black meets
@@ -144,55 +149,57 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
     corners must be excluded or every card would look black-bordered).
     """
     w, h = im.size
+    arr = np.array(im, dtype=np.uint8)
+    lum = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    lim_v = min(int(h * BORDER_MAX_DEPTH), h // 2)
+    lim_h = min(int(w * BORDER_MAX_DEPTH), w // 2)
 
-    # Analysis runs on a small copy: detection and border-depth profiling
-    # need proportions, not pixels, and doing it full-size costs ~1s a card.
-    scale = max(1, round(w / 420))
-    sw, sh = w // scale, h // scale
-    small = np.asarray(im.resize((sw, sh), Image.BILINEAR), dtype=np.float32)
-    sgray = small @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
-    sop = None
-    if opaque is not None:
-        sop = np.asarray(
-            Image.fromarray(opaque).resize((sw, sh), Image.NEAREST))
+    # Scanning happens at native resolution: on a downscaled copy the white
+    # collector text bleeds into the black band and stops the scan there.
+    # Only the four edge strips are converted, never the whole card.
+    def strip(sl_y, sl_x):
+        g = arr[sl_y, sl_x].astype(np.float32) @ lum
+        m = opaque[sl_y, sl_x] if opaque is not None else None
+        return g, m
+
+    g_top, m_top = strip(slice(0, lim_v), slice(None))
+    g_bot, m_bot = strip(slice(h - lim_v, h), slice(None))
+    g_left, m_left = strip(slice(None), slice(0, lim_h))
+    g_right, m_right = strip(slice(None), slice(w - lim_h, w))
+
+    # lines ordered from the edge inwards, so depth == index
+    edges = [
+        (g_top, m_top),
+        (g_bot[::-1], None if m_bot is None else m_bot[::-1]),
+        (g_left.T, None if m_left is None else m_left.T),
+        (g_right.T[::-1], None if m_right is None else m_right.T[::-1]),
+    ]
 
     # ---- guard 1: is this actually a uniform black border?
-    t = max(2, int(sw * BORDER_RING_FRAC))
-    ring = np.zeros((sh, sw), dtype=bool)
-    ring[:t, :] = ring[-t:, :] = True
-    ring[:, :t] = ring[:, -t:] = True
-    if sop is not None:
-        ring &= sop
-    vals = sgray[ring]
+    t = max(2, int(min(w, h) * BORDER_RING_FRAC))
+    ring = []
+    for lines, masks in edges:
+        band = lines[:t]
+        ring.append(band[masks[:t]] if masks is not None else band.ravel())
+    vals = np.concatenate(ring)
     if vals.size == 0:
         return im
     p50, p90 = (float(x) for x in np.percentile(vals, (50, 90)))
     if p50 > BORDER_MAX_LEVEL or (p90 - p50) > BORDER_MAX_SPREAD:
         return im
 
-    # ---- how deep does the border go on EACH edge? (on the small copy)
-    cutoff = p90 + 22
-
-    def edge_depth(vertical: bool, from_end: bool, limit: int) -> int:
+    # ---- how deep does the border go on EACH edge?
+    def edge_depth(lines, masks) -> int:
+        limit = lines.shape[0]
         for d in range(t, limit):
-            if vertical:
-                i = sh - 1 - d if from_end else d
-                line, mask = sgray[i, :], (sop[i, :] if sop is not None else None)
-            else:
-                i = sw - 1 - d if from_end else d
-                line, mask = sgray[:, i], (sop[:, i] if sop is not None else None)
-            v = line[mask] if mask is not None else line
-            if v.size and float(np.percentile(v, 60)) > cutoff:
+            v = lines[d][masks[d]] if masks is not None else lines[d]
+            if v.size < 8:
+                continue
+            if abs(float(np.percentile(v, BORDER_BG_PCT)) - p50) > BORDER_LEVEL_TOL:
                 return d
         return limit
 
-    lim_v = int(sh * BORDER_MAX_DEPTH)
-    lim_h = int(sw * BORDER_MAX_DEPTH)
-    top_px = edge_depth(True, False, lim_v) * scale
-    bot_px = edge_depth(True, True, lim_v) * scale
-    left_px = edge_depth(False, False, lim_h) * scale
-    right_px = edge_depth(False, True, lim_h) * scale
-    border_px = max(top_px, bot_px, left_px, right_px)
+    top_px, bot_px, left_px, right_px = (edge_depth(l, m) for l, m in edges)
 
     fade = max(2.0, w * BORDER_FADE_FRAC)
     black_point = min(p90 + 6, BORDER_TONE_MAX - 5)
@@ -205,7 +212,6 @@ def _deepen_black_border(im: Image.Image, opaque=None) -> Image.Image:
     bb = min(int(bot_px + fade) + 2, h // 2)
     lb = min(int(left_px + fade) + 2, w // 2)
     rb = min(int(right_px + fade) + 2, w // 2)
-    arr = np.array(im, dtype=np.uint8)
 
     def treat(y0, y1, x0, x1):
         sub = arr[y0:y1, x0:x1].astype(np.float32)
