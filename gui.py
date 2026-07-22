@@ -756,6 +756,14 @@ class ImportDialog(ctk.CTkToplevel):
 # --------------------------------------------------------------------------
 _PAGE_MM = {"Letter": (215.9, 279.4), "A4": (210.0, 297.0)}
 
+# Cards are kept at WORK_SIZE in memory: big enough for the detector to
+# behave as it will at print resolution and for the loupe to magnify, small
+# enough to redraw the whole sheet instantly.
+WORK_SIZE = (640, 896)
+THUMB_SIZE = (200, 279)
+LOUPE_PX = 148              # size of the magnifier window, in pixels
+LOUPE_MM = 12               # how much of the card it shows (~6x zoom)
+
 GUIDE_CHOICES = ["White", "Black", "Gray", "None"]
 BLEED_COLOR_CHOICES = ["Black", "White"]
 
@@ -775,7 +783,10 @@ class ExportDialog(ctk.CTkToplevel):
         self.configure(fg_color=BG)
 
         self._thumbs = {}          # path -> raw thumbnail
-        self._thumbs_raw = {}      # path -> (mid-size flat image, alpha mask)
+        self._thumbs_raw = {}      # path -> (working-size flat image, mask)
+        self._work_b = {}          # path -> working-size treated image
+        self._hover = None         # cursor position inside the preview image
+        self._base_preview = None  # preview without the loupe drawn on it
         self._thumbs_b = {}        # path -> thumbnail with the border treated
         self._border_modes = {}    # path -> "auto" | "on" | "off"
         self._slots = []           # preview hit-boxes: (x0, y0, x1, y1, path)
@@ -944,8 +955,10 @@ class ExportDialog(ctk.CTkToplevel):
                                           text_color=MUTED)
         self.preview_label.grid(row=1, column=0, pady=(0, 10))
         self.preview_label.bind("<Button-1>", self._preview_click)
-        ctk.CTkLabel(right, text="Click a card to cycle its black border:  "
-                     "auto → force off → force on",
+        self.preview_label.bind("<Motion>", self._preview_motion)
+        self.preview_label.bind("<Leave>", self._preview_leave)
+        ctk.CTkLabel(right, text="Hover to magnify · click a card to cycle its "
+                     "black border: auto → off → on",
                      text_color=MUTED, font=("Segoe UI", 11)).grid(
             row=2, column=0, pady=(0, 8))
 
@@ -1050,14 +1063,15 @@ class ExportDialog(ctk.CTkToplevel):
                 continue
             try:
                 src = PILImage.open(p).convert("RGBA")
-                # treat at a workable size so detection behaves like it will
-                # at full resolution, then shrink for display
-                mid = src.resize((420, 586))
+                # Working copy is deliberately larger than the preview: the
+                # detector behaves like it will at print resolution, and the
+                # loupe has real detail to magnify.
+                mid = src.resize(WORK_SIZE)
                 flat = PILImage.new("RGB", mid.size, (0, 0, 0))
                 flat.paste(mid, mask=mid.split()[3])
-                self._thumbs[key] = flat.resize((200, 279))
                 opaque = np.asarray(mid.split()[3]) > 250
                 self._thumbs_raw[key] = (flat, opaque)
+                self._thumbs[key] = flat.resize(THUMB_SIZE)
                 self._thumbs_b[key] = self._treated_thumb(key)
             except (OSError, ValueError):
                 continue
@@ -1067,15 +1081,16 @@ class ExportDialog(ctk.CTkToplevel):
             pass
 
     def _treated_thumb(self, key):
-        """Thumbnail with the border treated using the current sliders."""
+        """Working-size treated copy (cached for the loupe) plus its thumb."""
         pair = self._thumbs_raw.get(key)
         if not pair:
             return None
         flat, opaque = pair
-        return print_sheet._deepen_black_border(
-            flat, opaque,
-            amount=self.border_amount.get() / 100.0,
-            manual_width=0.0).resize((200, 279))
+        work = print_sheet._deepen_black_border(
+            flat, opaque, amount=self.border_amount.get() / 100.0,
+            manual_width=0.0)
+        self._work_b[key] = work
+        return work.resize(THUMB_SIZE)
 
     def _refresh_preview(self, *_):
         if self._prev_job:
@@ -1189,9 +1204,9 @@ class ExportDialog(ctk.CTkToplevel):
 
         d.rectangle([0, 0, W - 1, H - 1], outline=(185, 190, 200))
 
-        self._preview_img = ctk.CTkImage(light_image=img, dark_image=img,
-                                         size=(W, H))
-        self.preview_label.configure(image=self._preview_img, text="")
+        self._base_preview = img
+        self._scale_mm = s
+        self._render_preview()
 
         sheets = -(-len(fronts) // per_page)          # sheets of paper
         pages = sheets * 2 if duplex else sheets      # PDF pages
@@ -1214,6 +1229,76 @@ class ExportDialog(ctk.CTkToplevel):
                 pass
             self._prev_job = None
         super().destroy()
+
+    def _render_preview(self):
+        """Show the cached sheet, with the magnifier drawn on top if hovering."""
+        base = self._base_preview
+        if base is None or not self.winfo_exists():
+            return
+        img = base
+        if self._hover:
+            lens = self._loupe(*self._hover)
+            if lens is not None:
+                img = base.copy()
+                img.paste(lens[0], lens[1])
+        self._preview_img = ctk.CTkImage(light_image=img, dark_image=img,
+                                         size=img.size)
+        self.preview_label.configure(image=self._preview_img, text="")
+
+    def _loupe(self, px, py):
+        """Magnified crop of the card under the cursor, plus where to paste."""
+        for x0, y0, x1, y1, key in self._slots:
+            if not (key and x0 <= px <= x1 and y0 <= py <= y1):
+                continue
+            mode = self._border_modes.get(key, "auto")
+            treated = mode == "on" or (
+                mode == "auto" and self.border.get() != BORDER_MODES[0])
+            src = (self._work_b if treated else {}).get(key)
+            if src is None:
+                pair = self._thumbs_raw.get(key)
+                src = pair[0] if pair else None
+            if src is None:
+                return None
+            # cursor position as a fraction of the card, then in source pixels
+            fx = (px - x0) / max(1, x1 - x0)
+            fy = (py - y0) / max(1, y1 - y0)
+            sw, sh = src.size
+            half = int(sw * (LOUPE_MM / 63.0) / 2)
+            cx = min(max(int(fx * sw), half), sw - half)
+            cy = min(max(int(fy * sh), half), sh - half)
+            crop = src.crop((cx - half, cy - half, cx + half, cy + half))
+            lens = crop.resize((LOUPE_PX, LOUPE_PX), PILImage.NEAREST)
+            d = PILDraw.Draw(lens)
+            d.rectangle([0, 0, LOUPE_PX - 1, LOUPE_PX - 1],
+                        outline=(212, 160, 23), width=2)
+            d.line([LOUPE_PX // 2 - 6, LOUPE_PX // 2, LOUPE_PX // 2 + 6,
+                    LOUPE_PX // 2], fill=(212, 160, 23))
+            d.line([LOUPE_PX // 2, LOUPE_PX // 2 - 6, LOUPE_PX // 2,
+                    LOUPE_PX // 2 + 6], fill=(212, 160, 23))
+            # place it clear of the cursor, kept inside the sheet
+            W, H = self._base_preview.size
+            lx = px + 18 if px < W // 2 else px - LOUPE_PX - 18
+            ly = py + 18 if py < H // 2 else py - LOUPE_PX - 18
+            lx = min(max(lx, 0), W - LOUPE_PX)
+            ly = min(max(ly, 0), H - LOUPE_PX)
+            return lens, (lx, ly)
+        return None
+
+    def _preview_motion(self, event):
+        if not self._preview_img:
+            return
+        iw, ih = self._preview_img.cget("size")
+        ox = max(0, (self.preview_label.winfo_width() - iw) // 2)
+        oy = max(0, (self.preview_label.winfo_height() - ih) // 2)
+        pos = (event.x - ox, event.y - oy)
+        if pos != self._hover:
+            self._hover = pos
+            self._render_preview()
+
+    def _preview_leave(self, _event=None):
+        if self._hover:
+            self._hover = None
+            self._render_preview()
 
     def _preview_click(self, event):
         """Cycle one card's black border: auto -> force off -> force on."""
