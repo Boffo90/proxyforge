@@ -141,7 +141,7 @@ BORDER_MAX_DEPTH = 0.13      # per-edge cap, fraction of that dimension
 # 1200 DPI this is a quarter of a millimetre — enough to avoid a hard cut,
 # too small to see.
 BORDER_FADE_FRAC = 0.005     # fade-out distance past the detected border
-BORDER_TONE_MAX = 90         # pixels brighter than this are never touched
+BORDER_TONE_MAX = 100       # inside the frame, pixels below this go black
 
 
 def _apply_profile(im: Image.Image, profile, shadow=0) -> Image.Image:
@@ -350,13 +350,19 @@ def _apply_border(im, arr, w, h, lum, black,
             term(prof_right[y0:y1, None], w - 1 - xx),
         ]
         spatial = np.maximum.reduce(np.broadcast_arrays(*terms))
-        # ---- guard 3: tonal weight (only already-dark pixels)
-        tonal = np.clip((BORDER_TONE_MAX - sub @ lum) /
-                        (BORDER_TONE_MAX - black_point), 0.0, 1.0)
-        weight = (spatial * tonal * amount)[..., None]
-        scaled = np.clip((sub - black_point) * k, 0, 255)
-        arr[y0:y1, x0:x1] = (sub * (1.0 - weight) + scaled * weight).astype(
-            np.uint8)
+        # ---- guard 3: a frame pixel goes fully to black, it is never left at
+        # a fraction. A proportional weight turned the grey transition between
+        # the black frame and the text box (and the halo around the credit
+        # line) into an uneven mid-grey that prints as mottling. So the
+        # decision is binary per pixel: inside the frame AND dark -> solid
+        # black; anything else keeps its value. `amount` scales the black we
+        # blend to, so the effect can still be softened globally.
+        gray = sub @ lum
+        treat = (spatial > 0.5) & (gray < BORDER_TONE_MAX)
+        black_to = (1.0 - amount)          # 0 at full strength
+        out = sub.copy()
+        out[treat] = out[treat] * black_to
+        arr[y0:y1, x0:x1] = out.astype(np.uint8)
 
     if tb:
         treat(0, tb, 0, w)
